@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-custom-prompt-injection
+      name: dsh-custom-prompt-injection
+

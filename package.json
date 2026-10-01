@@ -1,0 +1,50 @@
+{
+  "name": "dsh-custom-prompt-injection",
+  "version": "1.0.0",
+  "description": "自定义提示词注入（Custom Prompt Injection）—— DSH 宿主插件的双层系统提示词注入层：Order 100 通用内核 + Order 200 强化层，附 1 个元数据工具（custom_prompt_profile）、armor 会话投影与客户端状态条。本副本为本地分发版：无远端仓库声明、不注册系统协议、不访问网络。",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./client.js": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "HARNESS_PLUGIN.md",
+    "README.md",
+    "LICENSE",
+    "prompts",
+    "lib",
+    "tests",
+    "scripts"
+  ],
+  "scripts": {
+    "harness:check": "node --check index.js && node --check client.js",
+    "verify": "node scripts/verify-injected.mjs",
+    "verify:injected": "node scripts/verify-injected.mjs",
+    "verify:archive": "node scripts/verify-kernel.mjs",
+    "smoke:host": "node scripts/smoke-injection-host.mjs",
+    "smoke:scorer": "node scripts/scorer_semantics_test.mjs",
+    "smoke:client": "node scripts/smoke-injection-client.mjs"
+  },
+  "dsh": {
+    "id": "dsh-custom-prompt-injection",
+    "name": "自定义提示词注入",
+    "permissions": "系统提示词注入, 客户端状态条",
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    },
+    "compatibility": {
+      "runtime": ">=0.1.1-rc.1 <0.2.0"
+    }
+  }
+}
