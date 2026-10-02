@@ -28,6 +28,7 @@
     "verify": "node scripts/verify-injected.mjs",
     "verify:injected": "node scripts/verify-injected.mjs",
     "verify:archive": "node scripts/verify-kernel.mjs",
+    "verify:anchors": "node scripts/verify-anchors.mjs",
     "smoke:host": "node scripts/smoke-injection-host.mjs",
     "smoke:scorer": "node scripts/scorer_semantics_test.mjs",
     "smoke:client": "node scripts/smoke-injection-client.mjs"
@@ -44,7 +45,7 @@
       "immediately": true
     },
     "compatibility": {
-      "runtime": ">=0.1.1-rc.1 <0.2.0"
+      "runtime": ">=0.1.1-rc.1 <0.3.0"
     }
   }
 }

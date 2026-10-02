@@ -80,12 +80,15 @@ async function boot() {
   return { sections, routes, ctx, call, projections };
 }
 
+/** 常驻语言段的 section 名（与 index.js 的 SECTION_LANG 一致）。 */
+const LANG = "custom-prompt-injection:language-zh";
+
 /* ───────────────────────── 一、开关与槽位 ───────────────────────── */
 const A = await boot();
 
 check(A.sections.has("custom-prompt-injection:global-system-prompt"), "初始：Order 100 已挂载");
 check(A.sections.has("custom-prompt-injection:dual-layer-reinforce"), "初始：Order 200 已挂载");
-check(A.sections.size === 2, "初始：槽位数量 = 2", "实际 " + A.sections.size);
+check(A.sections.size === 3, "初始：槽位数量 = 3（L1 + L2 + 常驻语言段）", "实际 " + A.sections.size);
 check(A.routes.has("/api/dsh-custom-prompt-injection/injection"), "路由已注册（/api 前缀）");
 check(A.sections.get("custom-prompt-injection:global-system-prompt").text() === KERNEL_TEXT, "Order 100 载荷文本已注入（与 prompts/kernel.md 逐字一致）");
 
@@ -95,14 +98,14 @@ check(q1.json.contract === 1, "契约版本 = 1", String(q1.json.contract));
 
 const off = await A.call({ enabled: false });
 check(off.json.enabled === false, "关闭：返回 enabled=false");
-check(A.sections.size === 0, "关闭：两段载荷已摘除", "实际 " + A.sections.size);
+check(A.sections.size === 1 && A.sections.has(LANG), "关闭：两段载荷已摘除，常驻语言段仍在", "实际 " + A.sections.size);
 
 const again = await A.call({ enabled: false });
-check(again.json.enabled === false && A.sections.size === 0, "关闭幂等（重复关闭不报错）");
+check(again.json.enabled === false && A.sections.size === 1 && A.sections.has(LANG), "关闭幂等（重复关闭不报错，常驻段不动）");
 
 const on = await A.call({ enabled: true });
 check(on.json.enabled === true, "重新启用：返回 enabled=true");
-check(A.sections.size === 2, "重新启用：两段载荷重新挂载（无重名冲突）", "实际 " + A.sections.size);
+check(A.sections.size === 3, "重新启用：两段载荷重新挂载（无重名冲突）", "实际 " + A.sections.size);
 check(A.sections.get("custom-prompt-injection:dual-layer-reinforce").order === 200, "重新挂载后 order 正确");
 
 // 2026-10-01 新增：开关往返不改变 section 文本 → 下一轮前缀逐字节相同 → 缓存不失效
@@ -110,7 +113,7 @@ const S1 = "custom-prompt-injection:global-system-prompt";
 const S2 = "custom-prompt-injection:dual-layer-reinforce";
 const t1a = A.sections.get(S1).text(), t2a = A.sections.get(S2).text(), o1a = A.sections.get(S1).order;
 await A.call({ enabled: false });
-check(A.sections.size === 0, "往返中途：确实处于空载（中间态存在）", "实际 " + A.sections.size);
+check(A.sections.size === 1 && A.sections.has(LANG), "往返中途：只剩常驻语言段（中间态存在）", "实际 " + A.sections.size);
 await A.call({ enabled: true });
 await A.call({ enabled: false });
 await A.call({ enabled: true });
@@ -120,7 +123,7 @@ check(t1a === t1b && t2a === t2b, "开关往返 2 次后：两段文本逐字节
 check(A.sections.get(S1).order === o1a && A.sections.get(S2).order === 200, "往返后 order 不变");
 
 const tog = await A.call({ toggle: true });
-check(tog.json.enabled === false && A.sections.size === 0, "toggle：切换到关闭");
+check(tog.json.enabled === false && A.sections.size === 1, "toggle：切换到关闭（常驻段仍在）");
 
 const snap = (await A.call({})).json;
 check(snap.sections.length === 2 && snap.sections[0].order === 100, "状态快照含两个槽位");
@@ -162,11 +165,11 @@ check(!!f3.lastRejected && typeof f3.lastRejected.reason === "string", "状态�
 // 正常关闭 → 重启必须沿用文件里的状态（跨重启记忆）
 await B.call({ enabled: false });
 const C = await boot();
-check(C.sections.size === 0, "状态记忆：重启后沿用文件里的「暂停」——不挂载任何槽位", "实际 " + C.sections.size);
+check(C.sections.size === 1 && C.sections.has(LANG), "状态记忆：重启后沿用「暂停」——不挂 L1/L2，只留常驻语言段", "实际 " + C.sections.size);
 const c1 = (await C.call({})).json;
 check(c1.enabled === false && c1.persist.source === "file" && c1.persist.tampered === false, "状态记忆：重启读文件成功（source=file，非 default）");
 await C.call({ enabled: true });
-check(C.sections.size === 2, "状态记忆：暂停状态的重启实例仍可被按钮重新启用");
+check(C.sections.size === 3, "状态记忆：暂停状态的重启实例仍可被按钮重新启用");
 
 /* ───────────────────────── 三、闪红台账（只追加、可溯源） ───────────────────────── */
 const LEDGER_PATH = join(HOME, "dsh-custom-prompt-injection", "ledger.jsonl");
@@ -222,7 +225,7 @@ delete process.env.DSH_HOME;
 const D = await boot();
 const d1 = (await D.call({})).json;
 check(d1.enabled === true && d1.persist.supported === false && d1.persist.source === "memory", "状态记忆：无 DSH_HOME 时退化为内存态");
-check((await D.call({ enabled: false })).json.enabled === false && D.sections.size === 0, "状态记忆：内存态仍可正常切换");
+check((await D.call({ enabled: false })).json.enabled === false && D.sections.size === 1, "状态记忆：内存态仍可正常切换（常驻段仍在）");
 process.env.DSH_HOME = HOME;
 
 rmSync(HOME, { recursive: true, force: true });

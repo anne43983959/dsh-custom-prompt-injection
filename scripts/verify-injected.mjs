@@ -40,7 +40,8 @@ ok(Number(ratio) > 15 && Number(ratio) < 85, "内核中英混排比例合理（�
 
 console.log("\n== 目录与留档 ==");
 ok(!existsSync(join(ROOT, "prompts", "candidates")), "prompts/candidates 已移除");
-ok(existsSync(join(ARCHIVE, "kernel-v1.md")) && existsSync(join(ARCHIVE, "reinforcement-v1.md")), "原版留档存在（archive/*-v1.md）");
+// 2026-10-02：留档载荷已移出插件目录（不再随包分发）——断言随之反转为「确实已移出」
+ok(!existsSync(ARCHIVE), "原版留档已移出插件目录（archive/ 不存在）");
 ok(existsSync(join(ROOT, "prompts", "kernel-mirror.md")), "kernel-mirror.md 在位");
 const mirror = existsSync(join(ROOT, "prompts", "kernel-mirror.md")) ? readFileSync(join(ROOT, "prompts", "kernel-mirror.md"), "utf8") : "";
 ok(mirror === k, "kernel-mirror.md 与 kernel.md 逐字节一致", mirror.length + " vs " + k.length);

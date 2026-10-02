@@ -11,6 +11,10 @@ const PROMPT41_URL = new URL("./prompts/reinforcement.md", import.meta.url);
 // 兼容 DSH 提示词变量插值引擎（非内置变量的连续花括号做安全转义，防止模板解析器抛出 malformed prompt variable reference）
 const PROMPT_TEXT = readFileSync(PROMPT_URL, "utf8").replace(/\{\{(?!(?:cwd|model|provider)\}\})/g, "{ {");
 const PROMPT41_TEXT = readFileSync(PROMPT41_URL, "utf8").replace(/\{\{(?!(?:cwd|model|provider)\}\})/g, "{ {");
+// ── 常驻语言层（2026-10-02 自 dsh-zh-thinking 迁入）────────────────────────────
+// 它与下面的注入开关**无关**：residentDisposer 是独立 effect，setInjection() 摘不到它。
+const LANGUAGE_URL = new URL("./prompts/language.md", import.meta.url);
+const LANGUAGE_TEXT = readFileSync(LANGUAGE_URL, "utf8").replace(/\{\{(?!(?:cwd|model|provider)\}\})/g, "{ {");
 
 // 双段注入镜像开关：
 //   true  = 沿用双层架构，Order 100 与 Order 200 各注入一份内核载荷
@@ -31,6 +35,9 @@ const PROMPT_SHA = promptSha12(PROMPT_TEXT + "\u0000" + PROMPT41_TEXT);
 
 const SECTION_100 = "custom-prompt-injection:global-system-prompt";
 const SECTION_200 = "custom-prompt-injection:dual-layer-reinforce";
+/** 常驻语言段：order 20 落在 persona(0) 之后、L1(100) 之前。 */
+const SECTION_LANG = "custom-prompt-injection:language-zh";
+const LANG_ORDER = 20;
 const INJECTION_ROUTE = "/api/dsh-custom-prompt-injection/injection";
 const INJECTION_CONTRACT_VERSION = 1;
 
@@ -331,6 +338,22 @@ async function readJson(request) {
   }
 }
 
+/** 常驻语言段（幂等）。与启停开关无关 —— 只随插件卸载释放。 */
+let residentDisposer = null;
+function mountResident(ctx) {
+  if (residentDisposer) return;
+  residentDisposer = ctx.effect(() => {
+    let dispose;
+    try {
+      dispose = ctx.systemPrompt.section({ name: SECTION_LANG, order: LANG_ORDER, text: () => LANGUAGE_TEXT });
+    } catch (error) {
+      console.warn("[custom-prompt-injection] 常驻语言段注册跳过：" + String((error && error.message) || error));
+      return;
+    }
+    return () => { try { dispose(); } catch { /* 卸载期异常不阻断 */ } };
+  }, "dsh-custom-prompt-injection: resident language section");
+}
+
 /** 挂上两段载荷（幂等）。 */
 function mountInjection(ctx) {
   if (injectionDisposer) return;
@@ -401,6 +424,10 @@ function injectionState() {
       { section: SECTION_100, order: 100, active: injectionEnabled },
       { section: SECTION_200, order: 200, active: injectionEnabled && DUAL_LAYER_INJECTION },
     ],
+    /* 常驻段永远 active：界面按钮切不到它，状态必须如实上报，否则用户会以为全关了 */
+    resident: [
+      { section: SECTION_LANG, order: LANG_ORDER, active: true, always: true },
+    ],
     promptRev: { rev: PROMPT_REV, sha: PROMPT_SHA },
     persist: persistSnapshot(),
     ledger: ledgerSnapshot(),
@@ -442,6 +469,8 @@ const profileTool = {
           order: 200,
           enabled: injectionEnabled && DUAL_LAYER_INJECTION,
         },
+        /* 常驻语言段：挂在独立 effect 上，界面开关摘不到它 —— 状态必须如实上报 */
+        { section: SECTION_LANG, order: LANG_ORDER, enabled: true, always: true },
       ],
       // 测试会话读载荷状态用（与状态路由同源）
       promptRev: { rev: PROMPT_REV, sha: PROMPT_SHA },
@@ -486,7 +515,7 @@ const profileTool = {
       ],
       hostFeatures: [
         "Dual-Layer Injection: Order 100 内核（身份/范围/契约/任务类） + Order 200 强化（锚点/禁用词/反例/抗漂移），两层内容完全差异化",
-        "Section Hosting: 双槽位可由 DUAL_LAYER_INJECTION 切换单段注入",
+        "Section Hosting: L1(100) + L2(200) 双槽位可由 DUAL_LAYER_INJECTION 切换单段注入；另有常驻语言段(20)，不受开关影响",
         "Armor Projection: 开头窗口(160)判拒 + REFUSAL/FALLBACK/SAFE/RISK 标记 + 域命中",
         "Client Badge: 输入框上方「自定义提示词注入」实时状态条",
         "Profile Tool: custom_prompt_profile 返回注入槽位、开关与状态记忆元数据",
@@ -686,6 +715,9 @@ export function apply(ctx) {
   // 台账路径与状态文件同目录；只在此处解析一次
   ledgerPath = ledgerFilePath();
 
+  // 常驻语言段：**无条件挂载**，与下面的开关无关
+  mountResident(ctx);
+
   // 两段载荷的注册与注销都收在同一个 effect 里：开关 = 挂上/摘掉它
   if (injectionEnabled) mountInjection(ctx);
 
@@ -781,6 +813,7 @@ export function apply(ctx) {
                 domainHits: v.domainHits === undefined ? 0 : v.domainHits,
                 injected: injectionEnabled,
                 dualLayer: DUAL_LAYER_INJECTION,
+                langResident: true,
                 promptRev: PROMPT_REV,
                 promptRevSha: PROMPT_SHA,
                 textLen: v.textLen === undefined ? 0 : v.textLen,

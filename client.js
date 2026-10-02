@@ -214,7 +214,7 @@
           var persistMode = !persistFile
             ? "unknown"     // 尚未拿到宿主回报：不猜
             : (persistFile.tampered ? "tampered" : (persistFile.supported ? "file" : "memory"));
-          var title = BRAND + " · " + (injectionOn ? "点击暂停注入" : "点击启用注入") + persistHint +
+          var title = BRAND + " · " + (injectionOn ? "点击暂停注入" : "点击启用注入") + "（本按钮只切 L1/L2，常驻语言段不受影响）" + persistHint +
             (syncError ? " · 与宿主同步失败：" + syncError : "");
 
 

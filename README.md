@@ -1,11 +1,7 @@
 # dsh-custom-prompt-injection
 
-给 DeepSeek Harness（DSH）补上**一层可开关的系统提示词注入**：一个两层载荷（L1 内核 + L2 强化）挂在系统提示词槽位上，配一个客户端开关按钮、一份跨重启的状态记忆、一套可追溯的判定台账。
+给 DeepSeek Harness（DSH）补上**一层可开关的系统提示词注入**：一个**三层载荷**（常驻语言段 + L1 内核 + L2 强化）挂在系统提示词槽位上，配一个客户端开关按钮、一份跨重启的状态记忆、一套可追溯的判定台账。
 
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-0078D4)
-![DSH](https://img.shields.io/badge/DSH-%E2%89%A5_0.1.1--rc.1-4B5563)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Validated](https://img.shields.io/badge/validated-0.1.7--rc.2-2EA043)
 
 > DSH 的默认系统提示词是给「通用助手」写的。要让它按固定口径产出（否定式约束、语域契约、交付形态），
 > 单靠每轮在用户消息里重复一遍既费 token 又不稳 —— 一旦某轮忘了写，行为就漂回去。
@@ -14,19 +10,30 @@
 
 ## 功能
 
-- 🧩 **双层载荷注入** —— L1 内核（`prompts/kernel.md`，9,289 B）+ L2 强化层（`prompts/reinforcement.md`，14,986 B）分别挂在两个系统提示词槽位上；改完载荷**完全重启 DSH** 生效（改的是模块顶层常量）。
+- 🧩 **三层载荷注入** —— 常驻语言段（`prompts/language.md`，572 B，order **20**）+ L1 内核（`prompts/kernel.md`，4,859 B，order **100**）+ L2 强化（`prompts/reinforcement.md`，7,955 B，order **200**）；三段合计 13,386 B。改完载荷**完全重启 DSH** 生效（改的是模块顶层常量）。
+- 🧷 **常驻层不受开关控制** —— 语言段挂在**独立 effect** 上，界面按钮只切 L1/L2，摘不掉它；状态条与工具会如实回报它仍在（`always: true`）。
 - 🔘 **一键开关** —— 输入框上方一个按钮，绿色＝注入中、红色＝已暂停；状态**跨重启记忆**，记在 home 的状态文件里，不随会话、不随页面。
 - 📊 **armor 会话投影** —— 把判定结果（verdict / domain / promptRev 等）投影成会话可视状态，客户端状态条直接读它。
 - 🧾 **闪红台账** —— 每次命中都留一条可追溯记录（`sid` + `seq` + `at` + `verdict` + `domain` + `promptRev`）。**不存输出片段**：台账只留指针，需要还原就按 `sid`/`seq` 回会话日志解包。
 - 🛠️ **一个元数据工具** —— `custom_prompt_profile`：把当前载荷版本、开关状态、槽位挂载情况作为结构化数据返回，供 agent 自查。
-- 🔍 **自带自检** —— 四套离线自检脚本（见「验证状态」），改载荷后先跑它们再重启。
+- 🔍 **自带自检** —— 七套离线自检入口（见「验证状态」），改载荷后先跑它们再重启。
 - 🛡️ **纯本地** —— 不注册系统协议、不发起网络请求、不改 DSH 安装树；只读写自己的 home 状态文件。
+
+## 载荷分层
+
+| order | section | 文件 | 大小 | 受开关控制 |
+|---:|---|---|---:|---|
+| **20** | `custom-prompt-injection:language-zh` | `prompts/language.md` | 572 B | ❌ **否**（常驻） |
+| **100** | `custom-prompt-injection:global-system-prompt` | `prompts/kernel.md` | 4,859 B | ✅ 是 |
+| **200** | `custom-prompt-injection:dual-layer-reinforce` | `prompts/reinforcement.md` | 7,955 B | ✅ 是 |
+
+三段恒定夹在宿主 `deployment:persona-prefix`（order 0）与 `PLAN_POLICY`（order 500）之间。宿主排序规则为 `order` 升序、同 order 按 section 名字典序。
 
 ## 兼容性
 
 | 项 | 要求 |
 |---|---|
-| DSH 版本 | `>=0.1.1-rc.1 <0.2.0`（清单 `dsh.compatibility.runtime`）；本机在 **`0.1.7-rc.2`** 实测通过 |
+| DSH 版本 | `>=0.1.1-rc.1 <0.3.0`（清单 `dsh.compatibility.runtime`）；本机在 **`0.1.5-rc.3` / `0.1.7-rc.2` / `0.2.0-rc.2`** 三份 home 均已装载 |
 | 系统 | Windows / macOS / Linux 均可（纯 JS，无原生依赖；安装脚本三种平台各一份） |
 | 宿主半 | 需要 `systemPrompt` 槽位服务与 `tools` 注册能力 |
 | 客户端半 | WebUI（`dsh.client.platform = web`）；在输入框上方挂座位 |
@@ -88,7 +95,7 @@ $H = "<你的 DSH_HOME>"; $P = "$H\profiles\web"
 ### 它会做什么
 
 - 读自己 home 下的状态文件与台账文件；
-- 向 DSH 的系统提示词槽位注册 / 注销两段文本（文本是常量，来自 `prompts/`）；
+- 向 DSH 的系统提示词槽位注册三段文本（文本是常量，来自 `prompts/`）：语言段常驻，L1/L2 随开关挂载与摘除；
 - 注册一个只读的元数据工具 `custom_prompt_profile`；
 - 在 WebUI 输入框上方挂一个按钮与一条状态显示。
 
@@ -104,7 +111,7 @@ $H = "<你的 DSH_HOME>"; $P = "$H\profiles\web"
 
 | 半 | 文件 | 职责 |
 |---|---|---|
-| 宿主半 | `index.js` | 读载荷（**模块顶层只读一次**）→ 读一次 home 状态文件 → 挂载/摘除 2 个系统提示词槽位 → 注册 1 个工具 → 注册 1 个会话投影（armor）→ 注册 1 条开关路由 |
+| 宿主半 | `index.js` | 读载荷（**模块顶层只读一次**）→ 读一次 home 状态文件 → 挂载/摘除 2 个可开关槽位（另加 1 个常驻语言段） → 注册 1 个工具 → 注册 1 个会话投影（armor）→ 注册 1 条开关路由 |
 | 客户端半 | `client.js`（手写 bundle） | 输入框上方的开关按钮（绿/红双态）；显示投影里的判定结果与状态文件异常提示 |
 | 清单补丁 | `cordis.patch.yml` | `insert: [{ id, name }]`，用于 patch 层注册路线 |
 
@@ -123,8 +130,9 @@ $H = "<你的 DSH_HOME>"; $P = "$H\profiles\web"
 
 | 自检 | 覆盖 | 怎么跑 |
 |---|---|---|
-| `verify:injected` | 现役 V3 载荷（41 项断言） | `npm run verify:injected` |
-| `verify:archive` | 同源一致性 / 留档载荷（373 项） | `npm run verify:archive` |
+| `verify:injected` | 现役载荷（L1 内核 + L2 强化 + 常驻语言段）结构与同源（41 项断言） | `npm run verify:injected` |
+| `verify:anchors` | 兼容回归：载荷锚点 / 注入面同源覆盖 / `index.js` 导出 / 安装协议 / 用例库结构（106 项断言） | `npm run verify:anchors` |
+| `verify:archive` | 留档载荷同源校验（留档在位时 373 项）；**留档已移出插件目录 → 现况为跳过**（打印存放位置，退出码 0） | `npm run verify:archive` |
 | `smoke:client` | 客户端半（44 条） | `npm run smoke:client` |
 | `smoke:host` | 宿主半（56 条） | `npm run smoke:host` |
 | `smoke:scorer` | 评分器语义 | `npm run smoke:scorer` |

@@ -11,6 +11,14 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // 本脚本校验的是**留档的原版**（L1 内核 + L2 强化 v1），路径指向 prompts/archive/。
 // 现役 V3 的结构校验见 scripts/verify-injected.mjs。
 const CANON_PATH = join(ROOT, "prompts", "archive", "kernel-v1.md");
+// 2026-10-02：留档载荷已移出插件目录 → 本脚本（专校验留档）无对象可校，优雅退出而不是抛 ENOENT。
+// 现役载荷的结构校验见 scripts/verify-injected.mjs。
+if (!existsSync(join(ROOT, "prompts", "archive"))) {
+  console.log("SKIP：留档载荷已移出插件目录（prompts/archive/ 不存在）——本脚本专校留档，无对象可校。");
+  console.log("      留档现存放于本机 .sandbox/cpi-archive-20261001/prompts-archive/（不随包分发，公开版无处可指）。");
+  console.log("      现役载荷（L1 内核 + L2 强化 + 常驻语言段）的结构校验请跑 scripts/verify-injected.mjs。");
+  process.exit(0);
+}
 // 归档的注入文本文件（逐字同源检查用）
 const INJECTED_PROMPT_FILES = [
   "archive/kernel-v1.md",
