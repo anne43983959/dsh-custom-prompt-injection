@@ -27,7 +27,7 @@ const has = (rel) => existsSync(join(ROOT, rel));
 const REQUIRED = [
   "index.js", "client.js", "cordis.patch.yml", "package.json", "README.md", "LICENSE",
   "install.mjs", "uninstall.mjs", "install.ps1", "install.sh", "install.bat",
-  "uninstall.ps1", "uninstall.sh", "scripts/check.mjs", "scripts/ledger.mjs",
+  "uninstall.ps1", "uninstall.sh", "scripts/check.mjs", "scripts/ledger.mjs", "scripts/score-session.mjs",
   "prompts/kernel-zh.md", "prompts/kernel-en.md",
   "prompts/reinforcement-zh.md", "prompts/reinforcement-en.md",
   "prompts/language-zh.md", "prompts/ptc-hygiene.md",

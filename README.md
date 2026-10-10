@@ -209,6 +209,7 @@ node scripts/check.mjs        # 离线结构自检（文件齐备 / 清单自洽
 | `install.ps1` `.sh` `.bat` / `uninstall.ps1` `.sh` | 上面两个脚本的薄包装，只负责找 node |
 | `scripts/check.mjs` | 离线自检（只读） |
 | `scripts/ledger.mjs` | 台账查看器 |
+| `scripts/score-session.mjs` | 会话判分（判定 / 首行 / 禁用句 / 思考块）—— 读本机会话，只读不联网 |
 | `scripts/smoke-injection-host.mjs` | 宿主半冒烟测试（用一次性临时 home，不碰你的环境） |
 
 ---

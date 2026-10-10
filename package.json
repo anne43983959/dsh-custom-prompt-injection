@@ -33,6 +33,7 @@
     "verify": "node scripts/check.mjs",
     "smoke:host": "node scripts/smoke-injection-host.mjs",
     "ledger": "node scripts/ledger.mjs",
+    "score:session": "node scripts/score-session.mjs",
     "plugin:install": "node install.mjs",
     "plugin:uninstall": "node uninstall.mjs"
   },
