@@ -64,9 +64,8 @@ for (const [name, text] of [["reinforcement-zh.md", reinfZh], ["reinforcement-en
   for (const sec of ["§A", "§B", "§C", "§O", "§C1", "§C2", "§C3", "§C4"]) {
     check(text.includes("## " + sec + " "), name + " 缺少 " + sec + " 锚点");
   }
-  check(!/^## §D\d /m.test(text), name + " 仍残留 §D1–§D5 技术域模块");
+  check(/^## §D1 /m.test(text) && /^## §D5 /m.test(text), name + " 缺少 §D1–§D5 技术域模块");
 }
-for (const [name, text] of P) check(!/^## §D\d /m.test(text), name + " 仍残留 §D 技术域模块");
 
 // ---------- 4. 源码不该有的东西 ----------
 const indexSrc = has("index.js") ? read("index.js") : "";
