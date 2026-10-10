@@ -1,6 +1,6 @@
 {
   "name": "dsh-custom-prompt-injection",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "自定义提示词注入（Custom Prompt Injection）—— DSH 宿主插件的双层系统提示词注入层：Order 100 通用内核 + Order 200 强化层，附 1 个元数据工具（custom_prompt_profile）、armor 会话投影与客户端状态条。本副本为本地分发版：无远端仓库声明、不注册系统协议、不访问网络。",
   "type": "module",
   "main": "./index.js",

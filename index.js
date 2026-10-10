@@ -4,17 +4,28 @@ import { dirname, join } from "node:path";
 
 import { DOMAIN_MARKERS } from "./lib/domain-markers.mjs";
 
-// ── 自定义提示词注入双层内核载荷 ────────────────────────────────────────────────
-// Order 100 通用内核 + Order 200 强化镜像，两段载荷同源同构（SHA256 一致）。
-const PROMPT_URL = new URL("./prompts/kernel.md", import.meta.url);
-const PROMPT41_URL = new URL("./prompts/reinforcement.md", import.meta.url);
+// ── 三档载荷（2026-10-10）：green 中文档 / blue 英文档 / red 无载荷 ──────────────
+//   green = language-zh.md(order 20) + kernel-zh.md(100) + reinforcement-zh.md(200)
+//   blue  = kernel-en.md(100) + reinforcement-en.md(200)，**无语言段**（英文基线）
+//   red   = 无载荷
+//   ptc-hygiene.md(order 30) 常驻，不随档位变化。
+const PROMPT_URL = new URL("./prompts/kernel-zh.md", import.meta.url);
+const PROMPT41_URL = new URL("./prompts/reinforcement-zh.md", import.meta.url);
+const PROMPT_EN_URL = new URL("./prompts/kernel-en.md", import.meta.url);
+const PROMPT41_EN_URL = new URL("./prompts/reinforcement-en.md", import.meta.url);
 // 兼容 DSH 提示词变量插值引擎（非内置变量的连续花括号做安全转义，防止模板解析器抛出 malformed prompt variable reference）
-const PROMPT_TEXT = readFileSync(PROMPT_URL, "utf8").replace(/\{\{(?!(?:cwd|model|provider)\}\})/g, "{ {");
-const PROMPT41_TEXT = readFileSync(PROMPT41_URL, "utf8").replace(/\{\{(?!(?:cwd|model|provider)\}\})/g, "{ {");
-// ── 常驻语言层（2026-10-02 自 dsh-zh-thinking 迁入）────────────────────────────
-// 它与下面的注入开关**无关**：residentDisposer 是独立 effect，setInjection() 摘不到它。
-const LANGUAGE_URL = new URL("./prompts/language.md", import.meta.url);
-const LANGUAGE_TEXT = readFileSync(LANGUAGE_URL, "utf8").replace(/\{\{(?!(?:cwd|model|provider)\}\})/g, "{ {");
+const escVars = (text) => text.replace(/\{\{(?!(?:cwd|model|provider)\}\})/g, "{ {");
+const PROMPT_TEXT = escVars(readFileSync(PROMPT_URL, "utf8"));
+const PROMPT41_TEXT = escVars(readFileSync(PROMPT41_URL, "utf8"));
+const PROMPT_EN_TEXT = escVars(readFileSync(PROMPT_EN_URL, "utf8"));
+const PROMPT41_EN_TEXT = escVars(readFileSync(PROMPT41_EN_URL, "utf8"));
+// ── 语言段（中文，2026-10-02 自 dsh-zh-thinking 迁入；2026-10-10 起属 green 档）──
+// 它只在 green 档挂载：blue 档不挂语言段，红档不挂任何载荷。
+const LANGUAGE_URL = new URL("./prompts/language-zh.md", import.meta.url);
+const LANGUAGE_TEXT = escVars(readFileSync(LANGUAGE_URL, "utf8"));
+// ── PTC 纪律段（2026-10-08 新增）：order 30，常驻，不随档位变化 ──
+const HYGIENE_URL = new URL("./prompts/ptc-hygiene.md", import.meta.url);
+const HYGIENE_TEXT = escVars(readFileSync(HYGIENE_URL, "utf8"));
 
 // 双段注入镜像开关：
 //   true  = 沿用双层架构，Order 100 与 Order 200 各注入一份内核载荷
@@ -38,10 +49,31 @@ const SECTION_200 = "custom-prompt-injection:dual-layer-reinforce";
 /** 常驻语言段：order 20 落在 persona(0) 之后、L1(100) 之前。 */
 const SECTION_LANG = "custom-prompt-injection:language-zh";
 const LANG_ORDER = 20;
+/** PTC 纪律段：order 30，紧随常驻语言段之后、L1 内核(100) 之前。 */
+const SECTION_HYGIENE = "custom-prompt-injection:ptc-hygiene";
+const HYGIENE_ORDER = 30;
 const INJECTION_ROUTE = "/api/dsh-custom-prompt-injection/injection";
-const INJECTION_CONTRACT_VERSION = 1;
+const INJECTION_CONTRACT_VERSION = 2;
 
-let injectionEnabled = true;
+// ── 三档状态（2026-10-10）─────────────────────────────────────────────────────
+// 档位是**进程级**的：systemPrompt.section() 是全局注册，无法按会话分发（section 不带 sessionId）。
+// 会话维度只用于两件事：① 记住"本对话用过的档位"（左键从 red 回跳）；② 写会话级状态日志。
+const MODES = Object.freeze(["green", "blue", "red"]);
+/** 默认档（2026-10-10 作者指示：默认改为蓝色 = 纯英基线）。
+ *  用于三处：启动初值、无状态文件时的兜底、红档左键「本会话没用过注入」的回跳目标。 */
+const DEFAULT_MODE = "blue";
+const MODE_LABEL = Object.freeze({
+  green: "启用注入（中文）",
+  blue: "启用注入（英文）",
+  red: "暂停注入",
+});
+let mode = DEFAULT_MODE;       // 生效档：section 当前挂载的就是它（日志按"实际生效"记账）
+let pendingMode = null;        // 待生效档：点选后挂在 pending，等**下一轮开始**才应用
+let pendingAction = null;
+let pendingAt = null;
+let lastNonRed = DEFAULT_MODE;
+const sessionModes = new Map(); // sessionId -> { lastNonRed, at, turn }
+const lastTurnSeen = new Map(); // sessionId -> 已处理过的轮次号（去重）
 let injectionDisposer = null;
 
 
@@ -55,18 +87,21 @@ let injectionDisposer = null;
 //   ⑤ 状态只能由用户在 WebUI 点按钮切换（宿主路由需 WebUI 会话鉴权，脚本访问 401）。
 // 边界说明：digest 是**完整性绊线**，用于识别手改与脚本改，不是密码学边界；
 //   真正的保障来自「进程内只读一次」＋「路由鉴权」＋「改动在界面与工具输出里可见」。
-const STATE_SCHEMA = 1;
+const STATE_SCHEMA = 2;
 const STATE_OWNER = "dsh-custom-prompt-injection";
 const STATE_KIND = "injection-state";
 const STATE_DIR = "dsh-custom-prompt-injection";
 const STATE_FILE = "state.json";
+const STATE_LOG_FILE = "session-modes.jsonl";
 const STATE_NOTE =
   "本文件由 dsh-custom-prompt-injection 单向写出：插件启动时读一次，此后只写不读。" +
-  "改这里不会改变插件状态——请在输入框上方的按钮上切换。";
+  "改这里不会改变插件状态——请在输入框上方的按钮上切换。" +
+  "schema 2（2026-10-10）：mode 三档 green/blue/red 取代 schema 1 的 enabled 布尔。";
 
 const BOOT_ID = randomUUID();
 
 let stateLoaded = false;
+let migratedFromSchema = null;
 let stateRevision = 0;
 let stateWrites = 0;
 let stateLastWriteAt = null;
@@ -81,24 +116,37 @@ function stateFilePath() {
 }
 
 /** 状态指纹：把状态绑进文件——只改 enabled 而不重算 digest 会被识别出来。 */
-function stateDigest(enabled, revision) {
+function stateDigest(modeValue, revision) {
   return createHash("sha256")
-    .update(
-      [STATE_OWNER, STATE_KIND, "v" + STATE_SCHEMA, "enabled=" + (enabled ? "true" : "false"), "revision=" + revision].join("|"),
-    )
+    .update([STATE_OWNER, STATE_KIND, "v" + STATE_SCHEMA, "mode=" + String(modeValue), "revision=" + revision].join("|"))
     .digest("hex");
 }
+
+/** schema 1 的指纹（仅用于旧文件迁移校验）。 */
+function stateDigestV1(enabled, revision) {
+  return createHash("sha256")
+    .update([STATE_OWNER, STATE_KIND, "v1", "enabled=" + (enabled ? "true" : "false"), "revision=" + revision].join("|"))
+    .digest("hex");
+}
+
+/** schema 1 → 2 的档位映射：启用（中文载荷）→ green；停用 → red。 */
+const modeFromLegacyEnabled = (enabled) => (enabled ? "green" : "red");
 
 /** 校验一份状态文档；null = 合法，否则返回拒绝原因。 */
 function stateDocumentError(doc) {
   if (!doc || typeof doc !== "object" || Array.isArray(doc)) return "不是 JSON 对象";
   if (doc.owner !== STATE_OWNER) return "owner 不匹配";
   if (doc.kind !== STATE_KIND) return "kind 不匹配";
-  if (doc.schema !== STATE_SCHEMA) return "schema 不受支持：" + String(doc.schema);
-  if (typeof doc.enabled !== "boolean") return "enabled 不是布尔值";
+  if (doc.schema !== STATE_SCHEMA && doc.schema !== 1) return "schema 不受支持：" + String(doc.schema);
   if (!Number.isInteger(doc.revision) || doc.revision < 0) return "revision 非法";
   if (typeof doc.digest !== "string") return "缺少 digest";
-  if (doc.digest !== stateDigest(doc.enabled, doc.revision)) return "digest 校验失败（文件被插件之外的东西改过）";
+  if (doc.schema === 1) {
+    if (typeof doc.enabled !== "boolean") return "enabled 不是布尔值";
+    if (doc.digest !== stateDigestV1(doc.enabled, doc.revision)) return "digest 校验失败（文件被插件之外的东西改过）";
+    return null;
+  }
+  if (typeof doc.mode !== "string" || MODES.indexOf(doc.mode) < 0) return "mode 非法：" + String(doc.mode);
+  if (doc.digest !== stateDigest(doc.mode, doc.revision)) return "digest 校验失败（文件被插件之外的东西改过）";
   return null;
 }
 
@@ -162,7 +210,13 @@ function loadPersistedState() {
     return persistInfo;
   }
 
-  injectionEnabled = doc.enabled;
+  if (doc.schema === 1) {
+    mode = modeFromLegacyEnabled(doc.enabled);
+    migratedFromSchema = 1;
+  } else {
+    mode = MODES.indexOf(doc.mode) >= 0 ? doc.mode : DEFAULT_MODE;
+  }
+  if (mode !== "red") lastNonRed = mode;
   stateRevision = doc.revision;
   Object.assign(persistInfo, {
     source: "file",
@@ -182,8 +236,9 @@ function writeStateDocument(extra) {
       schema: STATE_SCHEMA,
       owner: STATE_OWNER,
       kind: STATE_KIND,
-      enabled: injectionEnabled,
-        promptRev: PROMPT_REV,
+      mode: mode,
+      lastNonRed: lastNonRed,
+      promptRev: PROMPT_REV,
       revision: stateRevision,
       updatedAt: new Date().toISOString(),
       bootId: BOOT_ID,
@@ -191,7 +246,7 @@ function writeStateDocument(extra) {
     },
     extra || {},
   );
-  doc.digest = stateDigest(doc.enabled, doc.revision);
+  doc.digest = stateDigest(doc.mode, doc.revision);
 
   const tmp = persistInfo.path + ".tmp";
   try {
@@ -214,6 +269,8 @@ function writeStateDocument(extra) {
 
 /** 启动收尾：首次运行建档；被拒文件用真实状态回写（磁盘镜像始终等于真实状态）。 */
 function settleStateFile() {
+  // schema 1 旧文件：映射完成后立刻回写 schema 2（磁盘镜像始终与真实结构一致）
+  if (migratedFromSchema === 1) return writeStateDocument({ migratedFrom: "schema1" });
   if (persistInfo.source === "default") return writeStateDocument();
   if (persistInfo.source === "rejected") return writeStateDocument(stateRejected ? { lastRejected: stateRejected } : undefined);
   if (persistInfo.source === "unreadable") return writeStateDocument();
@@ -320,6 +377,81 @@ function ledgerSnapshot() {
   };
 }
 
+// ── 会话级档位日志（append-only JSONL；只写不读，不参与任何状态判定）──────────
+// 用途：记录"哪个会话在什么时间用了哪一档"，供事后把载荷与统计对齐（只落本机 home，不外发）。
+// 纪律：① 只追加，插件从不回读；② 写失败只记账不改行为；③ 超限滚动为带时间戳的旧文件（不删）。
+const MODE_LOG_MAX_BYTES = 1024 * 1024;
+let modeLogAppends = 0;
+let modeLogRotations = 0;
+let modeLogError = null;
+let modeLogLast = null;
+
+/** 日志文件绝对路径（与状态文件同目录；未设 DSH_HOME 时为 null）。 */
+function modeLogFilePath() {
+  const home = process.env.DSH_HOME;
+  return home ? join(home, STATE_DIR, STATE_LOG_FILE) : null;
+}
+
+function modeLogRotateIfNeeded() {
+  const file = modeLogFilePath();
+  if (!file) return false;
+  try {
+    if (statSync(file).size < MODE_LOG_MAX_BYTES) return false;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    renameSync(file, file.replace(/\.jsonl$/, "") + "-" + stamp + ".jsonl");
+    modeLogRotations += 1;
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+/** 追加一行档位事件；写失败只记账。 */
+function modeLogAppend(entry) {
+  const file = modeLogFilePath();
+  if (!file) return false;
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    if (modeLogAppends % 32 === 0) modeLogRotateIfNeeded();
+    const line = Object.assign(
+      { at: new Date().toISOString(), bootId: BOOT_ID, rev: stateRevision, source: "plugin" },
+      entry,
+    );
+    appendFileSync(file, JSON.stringify(line) + "\n", "utf8");
+    modeLogAppends += 1;
+    modeLogLast = line;
+    modeLogError = null;
+    return true;
+  } catch (error) {
+    modeLogError = String((error && error.message) || error);
+    return false;
+  }
+}
+
+function modeLogSnapshot() {
+  const file = modeLogFilePath();
+  return {
+    enabled: file !== null,
+    path: file,
+    entries: modeLogAppends,
+    rotations: modeLogRotations,
+    last: modeLogLast,
+    lastError: modeLogError,
+    maxBytes: MODE_LOG_MAX_BYTES,
+    note: "只追加、插件不回读；按 sessionId 可与 ledger.jsonl 关联",
+  };
+}
+
+/** 左键规则（宿主侧）：显示档为绿/蓝 ▶ 红；红 ▶ 本会话最近用过的非红档 ▶ 绿。 */
+function nextModeOnClick(sessionId) {
+  const displayed = pendingMode || mode;
+  if (displayed !== "red") return "red";
+  const sid = sessionId ? String(sessionId) : "unknown";
+  const rec = sessionModes.get(sid) || null;
+  const back = rec && rec.lastNonRed ? rec.lastNonRed : null;
+  return back === "blue" || back === "green" ? back : DEFAULT_MODE;
+}
+
 /** JSON 响应（与平台其余插件同形）。 */
 function json(data, status) {
   return new Response(JSON.stringify(data), {
@@ -338,56 +470,44 @@ async function readJson(request) {
   }
 }
 
-/** 常驻语言段（幂等）。与启停开关无关 —— 只随插件卸载释放。 */
+/** 常驻段（幂等）：PTC 纪律 order 30。与档位无关 —— 只随插件卸载释放。 */
 let residentDisposer = null;
 function mountResident(ctx) {
   if (residentDisposer) return;
   residentDisposer = ctx.effect(() => {
-    let dispose;
-    try {
-      dispose = ctx.systemPrompt.section({ name: SECTION_LANG, order: LANG_ORDER, text: () => LANGUAGE_TEXT });
-    } catch (error) {
-      console.warn("[custom-prompt-injection] 常驻语言段注册跳过：" + String((error && error.message) || error));
-      return;
-    }
-    return () => { try { dispose(); } catch { /* 卸载期异常不阻断 */ } };
-  }, "dsh-custom-prompt-injection: resident language section");
-}
-
-/** 挂上两段载荷（幂等）。 */
-function mountInjection(ctx) {
-  if (injectionDisposer) return;
-  injectionDisposer = ctx.effect(() => {
     const disposers = [];
-    // 重复装载（profile link 依赖 + 包内 bundle patch）时 section 名会冲突：
-    // 单条注册失败只记日志、不抛出，否则整个 entry 会装载失败并把路由一起回滚。
-    const mountSection = (definition) => {
-      try {
-        disposers.push(ctx.systemPrompt.section(definition));
-      } catch (error) {
-        console.warn(
-          "[custom-prompt-injection] section 注册跳过（已有一份在运行）：" +
-            String((error && error.message) || error),
-        );
-      }
-    };
-    mountSection({ name: SECTION_100, order: 100, text: () => PROMPT_TEXT });
-    if (DUAL_LAYER_INJECTION) {
-      mountSection({ name: SECTION_200, order: 200, text: () => PROMPT41_TEXT });
+    try {
+      disposers.push(ctx.systemPrompt.section({ name: SECTION_HYGIENE, order: HYGIENE_ORDER, text: () => HYGIENE_TEXT }));
+    } catch (error) {
+      console.warn("[custom-prompt-injection] 常驻纪律段注册跳过：" + String((error && error.message) || error));
     }
     return () => {
       for (const dispose of disposers.splice(0).reverse()) {
-        try {
-          dispose();
-        } catch (error) {
-          /* 卸载期异常不阻断：失败由调用方按返回值判断 */
-        }
+        try { dispose(); } catch { /* 卸载期异常不阻断 */ }
       }
     };
-  }, "dsh-custom-prompt-injection: system prompt sections");
+  }, "dsh-custom-prompt-injection: resident hygiene section");
 }
 
-/** 摘掉两段载荷（幂等）。 */
+/** 档位 → 段定义（red 返回空数组 = 什么都不挂）。 */
+function sectionsForMode(m) {
+  if (m === "blue") {
+    const defs = [{ name: SECTION_100, order: 100, text: () => PROMPT_EN_TEXT }];
+    if (DUAL_LAYER_INJECTION) defs.push({ name: SECTION_200, order: 200, text: () => PROMPT41_EN_TEXT });
+    return defs;
+  }
+  if (m === "green") {
+    const defs = [
+      { name: SECTION_LANG, order: LANG_ORDER, text: () => LANGUAGE_TEXT },
+      { name: SECTION_100, order: 100, text: () => PROMPT_TEXT },
+    ];
+    if (DUAL_LAYER_INJECTION) defs.push({ name: SECTION_200, order: 200, text: () => PROMPT41_TEXT });
+    return defs;
+  }
+  return [];
+}
+
+/** 摘掉当前载荷（幂等）。 */
 function unmountInjection() {
   if (!injectionDisposer) return;
   const dispose = injectionDisposer;
@@ -395,20 +515,103 @@ function unmountInjection() {
   dispose();
 }
 
-/** 切换注入；返回切换后的真实状态。挂载失败则不改状态。 */
-function setInjection(ctx, enabled) {
-  const next = Boolean(enabled);
-  if (next === injectionEnabled) return injectionEnabled;
-  if (next) {
-    mountInjection(ctx);
-    if (!injectionDisposer) throw new Error("注入挂载失败：systemPrompt.section 未返回 disposer");
-  } else {
-    unmountInjection();
+/** 按档位挂载（先摘后挂，幂等）。 */
+function mountMode(ctx, m) {
+  unmountInjection();
+  const defs = sectionsForMode(m);
+  if (!defs.length) return;
+  injectionDisposer = ctx.effect(() => {
+    const disposers = [];
+    // 重复装载（profile link 依赖 + 包内 bundle patch）时 section 名会冲突：
+    // 单条注册失败只记日志、不抛出，否则整个 entry 会装载失败并把路由一起回滚。
+    for (const definition of defs) {
+      try {
+        disposers.push(ctx.systemPrompt.section(definition));
+      } catch (error) {
+        console.warn("[custom-prompt-injection] section 注册跳过（已有一份在运行）：" + String((error && error.message) || error));
+      }
+    }
+    return () => {
+      for (const dispose of disposers.splice(0).reverse()) {
+        try { dispose(); } catch { /* 卸载期异常不阻断：失败由调用方按返回值判断 */ }
+      }
+    };
+  }, "dsh-custom-prompt-injection: mode sections " + m);
+}
+
+/**
+ * 点选档位：**只登记 pending**，不挂载、不写盘、不写日志。
+ * 真正生效发生在下一轮开始时（applyPendingMode）——单轮内切换不影响本轮任何一次请求。
+ */
+function requestMode(ctx, nextMode, sessionId, action) {
+  const next = MODES.indexOf(nextMode) >= 0 ? nextMode : DEFAULT_MODE;
+  const sid = sessionId ? String(sessionId) : "unknown";
+  const prev = sessionModes.get(sid) || null;
+  const changed = next !== mode;
+  if (!changed && !pendingMode) return { active: mode, pending: null, changed: false };
+  pendingMode = changed ? next : null; // 切回生效档 = 取消 pending（按钮上那段提示随之消失）
+  pendingAction = changed ? (action || "click") : null;
+  pendingAt = changed ? new Date().toISOString() : null;
+  sessionModes.set(sid, {
+    lastNonRed: next === "red" ? (prev && prev.lastNonRed ? prev.lastNonRed : null) : next,
+    at: new Date().toISOString(),
+    turn: prev ? prev.turn : null,
+  });
+  if (next !== "red") lastNonRed = next;
+  return { active: mode, pending: pendingMode, changed: !!pendingMode };
+}
+
+/**
+ * 轮次级生效：把 pending 应用到 section 挂载（含状态文件与日志）。
+ * 由投影钩子在「一轮开始」时调用 —— 因此同一轮内的所有请求共用同一套载荷。
+ */
+function applyPendingMode(ctx, sessionId, turnSeq) {
+  const next = pendingMode;
+  if (!next || next === mode) return false;
+  const from = mode;
+  const action = pendingAction || "click";
+  mountMode(ctx, next);
+  if (next !== "red" && !injectionDisposer) {
+    throw new Error("档位挂载失败：systemPrompt.section 未返回 disposer");
   }
-  injectionEnabled = next;
+  mode = next;
+  if (next !== "red") lastNonRed = next;
+  pendingMode = null;
+  pendingAction = null;
+  pendingAt = null;
+  // 注意：这里**不动会话记忆**（lastNonRed 在 requestMode 时按用户点选记录）——
+  // 若在此处用全局 lastNonRed 覆盖，会把"没用过注入的会话"污染成全局值。
+  const prevRec = sessionModes.get(sessionId || "unknown") || {};
+  sessionModes.set(sessionId || "unknown", Object.assign({}, prevRec, {
+    at: new Date().toISOString(),
+    turn: typeof turnSeq === "number" ? turnSeq : null,
+  }));
   // 单向同步：状态变了就往状态文件里写一份（写失败不影响状态本身）
   writeStateDocument();
-  return injectionEnabled;
+  // 日志：轮次级 —— 一行 = 一次真正生效，带轮次号
+  modeLogAppend({
+    scope: "session",
+    sessionId: sessionId || "unknown",
+    mode: next,
+    from: from,
+    action: action,
+    turn: typeof turnSeq === "number" ? turnSeq : null,
+    trigger: "turn-start",
+  });
+  return true;
+}
+
+/** 会话字段快照（未知会话 lastNonRed = null，客户端回落到 green）。 */
+function sessionSnapshot(sessionId) {
+  const sid = sessionId ? String(sessionId) : "unknown";
+  const rec = sessionModes.get(sid) || null;
+  return {
+    sessionId: sid,
+    lastNonRed: rec ? rec.lastNonRed : null,
+    lastTurn: rec ? rec.turn : null,
+    activeMode: mode,
+    pendingMode: pendingMode,
+  };
 }
 
 
@@ -418,19 +621,29 @@ function injectionState() {
     ok: true,
     contract: INJECTION_CONTRACT_VERSION,
     plugin: "dsh-custom-prompt-injection",
-    enabled: injectionEnabled,
+    mode: mode,
+    modeLabel: MODE_LABEL[mode],
+    pending: pendingMode,
+    pendingLabel: pendingMode ? MODE_LABEL[pendingMode] : null,
+    pendingAt: pendingAt,
+    /* 显示档：pending 优先（客户端据此渲染按钮与「状态已发生变化」提示） */
+    display: pendingMode || mode,
+    lastNonRed: lastNonRed,
     dualLayer: DUAL_LAYER_INJECTION,
     sections: [
-      { section: SECTION_100, order: 100, active: injectionEnabled },
-      { section: SECTION_200, order: 200, active: injectionEnabled && DUAL_LAYER_INJECTION },
+      { section: SECTION_LANG, order: LANG_ORDER, active: mode === "green", payload: "language-zh" },
+      { section: SECTION_100, order: 100, active: mode !== "red", payload: mode === "blue" ? "kernel-en" : "kernel-zh" },
+      { section: SECTION_200, order: 200, active: mode !== "red" && DUAL_LAYER_INJECTION, payload: mode === "blue" ? "reinforcement-en" : "reinforcement-zh" },
     ],
     /* 常驻段永远 active：界面按钮切不到它，状态必须如实上报，否则用户会以为全关了 */
     resident: [
-      { section: SECTION_LANG, order: LANG_ORDER, active: true, always: true },
+      { section: SECTION_HYGIENE, order: HYGIENE_ORDER, active: true, always: true },
     ],
+    modes: MODES.map((m) => ({ mode: m, label: MODE_LABEL[m] })),
     promptRev: { rev: PROMPT_REV, sha: PROMPT_SHA },
     persist: persistSnapshot(),
     ledger: ledgerSnapshot(),
+    modeLog: modeLogSnapshot(),
   };
 }
 
@@ -455,35 +668,47 @@ const profileTool = {
       targetArchitecture: "DeepSeek-V4 / V4-Pro / V4.1-Flash 全系列",
       baseline: "deepseek-unrestricted-v8-stable (dsh-custom-prompt-injection)",
       promptSource: [
-        "prompts/kernel.md",
-        "prompts/reinforcement.md",
+        "prompts/language-zh.md",
+        "prompts/kernel-zh.md",
+        "prompts/reinforcement-zh.md",
+        "prompts/kernel-en.md",
+        "prompts/reinforcement-en.md",
+        "prompts/ptc-hygiene.md",
       ],
       lineage: [
       "dsh-custom-prompt-injection — 双层协同注入内核",
         "v8 — 逆向 / 安全域专属强化（§K 降格拦截 + 逆向子域矩阵 + 四条逆向锚点）",
       ],
       injection: [
-        { section: SECTION_100, order: 100, enabled: injectionEnabled },
-        {
-          section: SECTION_200,
-          order: 200,
-          enabled: injectionEnabled && DUAL_LAYER_INJECTION,
-        },
-        /* 常驻语言段：挂在独立 effect 上，界面开关摘不到它 —— 状态必须如实上报 */
-        { section: SECTION_LANG, order: LANG_ORDER, enabled: true, always: true },
+        { section: SECTION_LANG, order: LANG_ORDER, enabled: mode === "green", payload: "language-zh" },
+        { section: SECTION_100, order: 100, enabled: mode !== "red", payload: mode === "blue" ? "kernel-en" : "kernel-zh" },
+        { section: SECTION_200, order: 200, enabled: mode !== "red" && DUAL_LAYER_INJECTION, payload: mode === "blue" ? "reinforcement-en" : "reinforcement-zh" },
+        /* 常驻纪律段：挂在独立 effect 上，档位切不到它 —— 状态必须如实上报 */
+        { section: SECTION_HYGIENE, order: HYGIENE_ORDER, enabled: true, always: true },
       ],
+      modes: [
+        { mode: "green", label: "中文 · 中文载荷", sections: ["language-zh(20)", "kernel-zh(100)", "reinforcement-zh(200)"] },
+        { mode: "blue", label: "英文 · 英文载荷", sections: ["kernel-en(100)", "reinforcement-en(200)"], note: "无语言段 = 英文基线" },
+        { mode: "red", label: "暂停注入", sections: [], note: "ptc-hygiene(30) 仍常驻" },
+      ],
+      clickRule: "绿/蓝 左键 ▶ 红；红 左键 ▶ 本对话最近用过的非红档（未用过 ▶ 绿）；右键菜单任选三档",
+      turnRule: "点选只登记 pending；进入下一轮时生效（日志按轮次记账 —— 一行 = 一次真正生效）",
       // 测试会话读载荷状态用（与状态路由同源）
       promptRev: { rev: PROMPT_REV, sha: PROMPT_SHA },
       injectionToggle: {
         route: INJECTION_ROUTE,
         contract: INJECTION_CONTRACT_VERSION,
-        enabled: injectionEnabled,
+        mode: mode,
+        pending: pendingMode,
+        effective: "轮次级 —— 点选只登记 pending，下一轮开始时应用；单轮内不改载荷",
+        lastNonRed: lastNonRed,
+        sessions: sessionModes.size,
         switchableBy: "user-button-only（WebUI 按钮；宿主路由需会话鉴权，脚本访问 401）",
         fileEdits: "无效——状态文件只在插件启动时被读一次，此后插件只写不读",
         persistence: persistSnapshot(),
         verdictLedger: ledgerSnapshot(),
       },
-      mode: "armor — 双层差异化协同注入（L1 内核 + L2 强化），零工具面纯净直出",
+      mode: "armor — 三档差异化协同注入（green 中文套 / blue 英文套 / red 无载荷），零工具面纯净直出",
       payloadSections: [
         "L1 §1 WHAT YOU ARE — 身份重定义：文档引擎，非助手/非对话伙伴",
         "L1 §2 HOW SCOPE IS RESOLVED — 范围在环境层已解决，不存在评估环节",
@@ -515,11 +740,13 @@ const profileTool = {
       ],
       hostFeatures: [
         "Dual-Layer Injection: Order 100 内核（身份/范围/契约/任务类） + Order 200 强化（锚点/禁用词/反例/抗漂移），两层内容完全差异化",
-        "Section Hosting: L1(100) + L2(200) 双槽位可由 DUAL_LAYER_INJECTION 切换单段注入；另有常驻语言段(20)，不受开关影响",
+        "Three-Mode Hosting: green = 语言段(20)+L1(100)+L2(200) 中文套；blue = L1(100)+L2(200) 英文套（无语言段，英文基线）；red = 无载荷；ptc-hygiene(30) 三档常驻",
         "Armor Projection: 开头窗口(160)判拒 + REFUSAL/FALLBACK/SAFE/RISK 标记 + 域命中",
         "Client Badge: 输入框上方「自定义提示词注入」实时状态条",
         "Profile Tool: custom_prompt_profile 返回注入槽位、开关与状态记忆元数据",
-        "State Memory: 开关状态记在 home 的 dsh-custom-prompt-injection/state.json —— 启动读一次、此后单向写回（插件→文件）；运行期改文件无效，切换只能由用户在界面点按钮",
+        "State Memory: 档位记在 home 的 dsh-custom-prompt-injection/state.json（schema 2 = mode 三档）—— 启动读一次、此后单向写回（插件→文件）；运行期改文件无效，切换只能由用户在界面点按钮",
+        "Mode Log: 每次切换追加一行到 home 的 dsh-custom-prompt-injection/session-modes.jsonl（会话 id、from → to、动作、来源），只写不读、1 MB 轮转",
+        "English Baseline: blue 档只挂英文 L1/L2、不挂语言段 —— 用于把「思考语言」与「载荷」两个变量分开测量",
       ],
       features: [
         "Pure Zero-Tool Architecture: 零工具面纯净直出，消除决策噪音",
@@ -715,16 +942,18 @@ export function apply(ctx) {
   // 台账路径与状态文件同目录；只在此处解析一次
   ledgerPath = ledgerFilePath();
 
-  // 常驻语言段：**无条件挂载**，与下面的开关无关
+  // 常驻纪律段（ptc-hygiene, order 30）：**无条件挂载**，与档位无关
   mountResident(ctx);
 
-  // 两段载荷的注册与注销都收在同一个 effect 里：开关 = 挂上/摘掉它
-  if (injectionEnabled) mountInjection(ctx);
+  // 按当前档位挂载载荷（green/blue 各挂一套，red 不挂）：切换 = 先摘后挂
+  mountMode(ctx, mode);
 
-  // 运行时开关路由：GET/POST /api/dsh-custom-prompt-injection/injection
-  //   body {}                 → 只查询当前状态
-  //   body { enabled: bool }  → 设定状态
-  //   body { toggle: true }   → 反转为当前状态的相反值
+  // 档位路由：GET/POST /api/dsh-custom-prompt-injection/injection
+  //   body {}                          → 只查询当前状态
+  //   body { mode: "green|blue|red" }  → 设定档位（可带 sessionId，用于会话记忆与日志）
+  //   body { sessionId }               → 附带返回该会话的档位记忆
+  //   body { toggle: true }            → 左键规则切一档（兼容旧客户端）
+  //   body { enabled: bool }           → 兼容旧契约：true ▶ green / false ▶ red
   // 用 ctx.inject 等 connection 就绪后再注册，避免未注入即抛。
   ctx.inject(["connection"], (scope) => {
     scope.effect(
@@ -738,9 +967,13 @@ export function apply(ctx) {
             try {
               const body = await readJson(request);
               if (typeof body.scope === "string") setScope(body.scope);
-              if (typeof body.enabled === "boolean") setInjection(ctx, body.enabled);
-              else if (body.toggle === true) setInjection(ctx, !injectionEnabled);
-              return json(injectionState(), 200);
+              const sid = typeof body.sessionId === "string" ? body.sessionId : "unknown";
+              if (typeof body.mode === "string") requestMode(ctx, body.mode, sid, typeof body.action === "string" ? body.action : "switch");
+              else if (body.toggle === true) requestMode(ctx, nextModeOnClick(sid), sid, "click");
+              else if (typeof body.enabled === "boolean") requestMode(ctx, body.enabled ? "green" : "red", sid, "legacy");
+              const snap = injectionState();
+              const sess = sessionSnapshot(sid);
+              return json(Object.assign({}, snap, { session: sess, sessionLastNonRed: sess.lastNonRed }), 200);
             } catch (error) {
               return json({ ok: false, error: String((error && error.message) || error) }, 500);
             }
@@ -799,6 +1032,20 @@ export function apply(ctx) {
             try {
               if (key !== "armor") return;
               const v = value || {};
+              // 轮次级生效：一轮开始（running=true 且轮次号变化）时把 pending 落到 section 上。
+              // 单轮内的切换只登记 pending —— 该轮所有请求继续用同一套载荷。
+              if (v.running === true) {
+                const turnSid = String((session && session.id) || "unknown");
+                const turnSeq = typeof v.seq === "number" ? v.seq : Number(seq);
+                if (lastTurnSeen.get(turnSid) !== turnSeq) {
+                  lastTurnSeen.set(turnSid, turnSeq);
+                  try {
+                    applyPendingMode(ctx, turnSid, turnSeq);
+                  } catch (error) {
+                    console.warn("[custom-prompt-injection] 档位生效失败：" + String((error && error.message) || error));
+                  }
+                }
+              }
               if (!v.verdict) return;
               ledgerAppend({
                 v: 1,
@@ -811,9 +1058,10 @@ export function apply(ctx) {
                 risk: Array.isArray(v.risk) ? v.risk : [],
                 domain: v.domain === undefined ? null : v.domain,
                 domainHits: v.domainHits === undefined ? 0 : v.domainHits,
-                injected: injectionEnabled,
+                mode: mode,
+                injected: mode !== "red",
                 dualLayer: DUAL_LAYER_INJECTION,
-                langResident: true,
+                langResident: mode === "green",
                 promptRev: PROMPT_REV,
                 promptRevSha: PROMPT_SHA,
                 textLen: v.textLen === undefined ? 0 : v.textLen,

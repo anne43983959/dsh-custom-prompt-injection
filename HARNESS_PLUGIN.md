@@ -5,6 +5,19 @@
 
 ---
 
+## ⚠️ 2026-10-10 变更（三档 + 轮次级生效）
+
+本文件其余章节写于 v2（两态开关）时期，**行为描述以下列 v3 事实为准**（完整对照见 `README.md` 的「v3 变更」「三档」「轮次级生效」三节）：
+
+- **三档**：`green` = 语言段(20) + 中文 L1(100) + 中文 L2(200)；`blue` = 英文 L1/L2（**无语言段**，英文思考要求内建在 `kernel-en.md` §8）；`red` = 不注入。`ptc-hygiene`(30) **三档常驻**。
+- **轮次级生效**：路由只登记 `pendingMode`；`applyPendingMode()` 由投影回调在**一轮开始**（`running === true` 且轮次号变化）时调用 —— 单轮内所有请求共用同一套载荷。
+- **状态文件 schema 2**：`mode` 取代 `enabled`；启动时自动迁移并回写（`enabled:true → green`、`false → red`）。
+- **日志**：新增 `session-modes.jsonl`（只追加、1 MB 轮转、写失败只记账），一行 = 一次真正生效，字段 `at / sessionId / mode / from / action / turn / trigger`。
+- **路由契约 v2**：`POST {mode, sessionId, action}`；兼容 `{toggle:true}`（按左键规则）与 `{enabled:bool}`。
+- **工具输出**：`custom_prompt_profile` 增加 `modes` / `clickRule` / `turnRule` / `injectionToggle.pending` 字段。
+- **自检**：`scripts/smoke-injection-host.mjs` 已按三档重写（58 项断言，含轮次生效、跨会话记忆隔离、schema 1→2 迁移）。
+- **版本**：本插件 **1.1.0**（v3 三档）；配套 PTC 增强插件实测版本 —— `dsh-ptc-plus` **0.4.10**、`dsh-fail-logger` **0.5.5**（互不依赖，推荐同装；见 `README.md` 的「配套版本」表）。
+
 ## ⚠️ 2026-10-01 变更（默认注入切换 + 去测试功能）
 
 | 项 | 现状 |
