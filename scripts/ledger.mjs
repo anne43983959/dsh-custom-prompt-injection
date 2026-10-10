@@ -89,7 +89,6 @@ if (wantId && rows.length) {
   console.log("【台账条目】" + r.at + "  sid=" + r.sid + "  seq=" + r.seq);
   console.log("  判定      : " + r.verdict);
   console.log("  命中词    : " + JSON.stringify(r.words || []));
-  console.log("  域/风险词 : " + (r.domain || "-") + " / " + JSON.stringify(r.risk || []));
   console.log("  当轮注入  : " + (r.injected ? "开" : "关") + "（双层=" + r.dualLayer + "）");
   console.log("  正文长度  : " + r.textLen + " 字符（摘录 " + (r.excerpt || "").length + "）");
   console.log("  摘录      : " + (r.excerpt || ""));
@@ -114,7 +113,7 @@ console.log("最近 " + rows.length + " 条：");
 for (const r of rows.slice(-40)) {
   const w = (r.words && r.words[0]) || "";
   console.log("  " + String(r.at).slice(0, 19) + "  " + String(r.verdict).padEnd(8) + " inj=" + (r.injected ? "on " : "off") +
-    "  " + String(r.sid).slice(0, 8) + ":" + String(r.seq).padStart(5) + "  " + (r.domain || "-").padEnd(9) + "  " + w);
+    "  " + String(r.sid).slice(0, 8) + ":" + String(r.seq).padStart(5) + "  " + w);
 }
 console.log("");
 console.log("溯源：node scripts/ledger.mjs --id <sid>:<seq>");

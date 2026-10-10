@@ -71,7 +71,7 @@ async function boot() {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}),
   })).then((res) => res.json().then((json) => ({ status: res.status, json })));
   const emit = (sid, state, seq) => projections.listeners[0]({ id: sid }, "armor", state, seq);
-  const base = () => ({ running: false, verdict: null, words: [], safe: [], risk: [], domain: null, domainHits: 0, seq: null, at: Date.now(), textLen: 0, excerpt: "" });
+  const base = () => ({ running: false, verdict: null, words: [], safe: [], seq: null, at: Date.now(), textLen: 0, excerpt: "" });
   const turnStart = (sid, seq) => emit(sid, Object.assign(base(), { running: true, seq: seq }), seq);
   const turnEnd = (sid, seq, verdict) => emit(sid, Object.assign(base(), { running: false, seq: seq, verdict: verdict || "pass", textLen: 12, excerpt: "smoke" }), seq);
   return { sections, routes, ctx, call, projections, emit, turnStart, turnEnd };

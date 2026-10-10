@@ -287,8 +287,6 @@
 
           var running = armorRunning;
           var words = armor && Array.isArray(armor.words) ? armor.words : [];
-          var risk = armor && Array.isArray(armor.risk) ? armor.risk : [];
-          var domain = armor && armor.domain ? armor.domain : null;
           var showVerdict = !running && lastVerdictRef.current !== null &&
             Date.now() < flashUntilRef.current;
           var showSwitch = !running && !showVerdict && switched !== null && Date.now() < switched.until;
@@ -317,7 +315,7 @@
             text = "执行中…";
           } else if (showVerdict) {
             if (verdict === "pass") {
-              text = "✓ 回复符合注入协议" + (domain ? " · " + domain : "") + (risk.length ? " · 载荷x" + risk.length : "");
+              text = "✓ 回复符合注入协议";
               badgeStyle.animation = "dshArmorFlash 1.2s ease";
             } else {
               text = "✗ 协议破坏：" + (words[0] || "未标注的越界表述");

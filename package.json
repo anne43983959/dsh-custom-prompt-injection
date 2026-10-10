@@ -1,7 +1,7 @@
 {
   "name": "dsh-custom-prompt-injection",
-  "version": "1.1.0",
-  "description": "自定义提示词注入（Custom Prompt Injection）—— DSH 宿主插件的双层系统提示词注入层：Order 100 通用内核 + Order 200 强化层，附 1 个元数据工具（custom_prompt_profile）、armor 会话投影与客户端状态条。本副本为本地分发版：无远端仓库声明、不注册系统协议、不访问网络。",
+  "version": "1.2.0",
+  "description": "自定义提示词注入（Custom Prompt Injection）—— 给 DSH 加一套可切换的系统提示词载荷：中文档 / 英文档 / 不注入，附三色状态条、跨重启档位记忆与轮次级生效日志。载荷是随包分发的提示词文本，安装不需要读它；插件不联网、不改 DSH 安装目录、不写 home 之外的位置。",
   "type": "module",
   "main": "./index.js",
   "exports": {
@@ -15,23 +15,26 @@
     "index.js",
     "client.js",
     "cordis.patch.yml",
-    "HARNESS_PLUGIN.md",
     "README.md",
     "LICENSE",
     "prompts",
-    "lib",
-    "tests",
-    "scripts"
+    "scripts",
+    "install.mjs",
+    "uninstall.mjs",
+    "install.ps1",
+    "uninstall.ps1",
+    "install.sh",
+    "uninstall.sh",
+    "install.bat"
   ],
   "scripts": {
     "harness:check": "node --check index.js && node --check client.js",
-    "verify": "node scripts/verify-injected.mjs",
-    "verify:injected": "node scripts/verify-injected.mjs",
-    "verify:archive": "node scripts/verify-kernel.mjs",
-    "verify:anchors": "node scripts/verify-anchors.mjs",
+    "check": "node scripts/check.mjs",
+    "verify": "node scripts/check.mjs",
     "smoke:host": "node scripts/smoke-injection-host.mjs",
-    "smoke:scorer": "node scripts/scorer_semantics_test.mjs",
-    "smoke:client": "node scripts/smoke-injection-client.mjs"
+    "ledger": "node scripts/ledger.mjs",
+    "plugin:install": "node install.mjs",
+    "plugin:uninstall": "node uninstall.mjs"
   },
   "dsh": {
     "id": "dsh-custom-prompt-injection",

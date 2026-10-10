@@ -1,224 +1,203 @@
 # dsh-custom-prompt-injection
 
-给 DeepSeek Harness（DSH）补上一套**三档可切换的系统提示词注入**：中文档 / 英文档 / 无载荷，配一个三色状态按钮、一份跨重启的档位记忆、一份**轮次级**的载荷状态日志，以及一套可追溯的判定台账。
+给 DeepSeek Harness（DSH）加一套**可切换的系统提示词载荷**：中文档 / 英文档 / 不注入。
+一个按钮切换，档位记在 home 里、重启后仍在；每次真正生效记一行日志。
 
-> DSH 的默认系统提示词是给「通用助手」写的。要让它按固定口径产出（否定式约束、语域契约、交付形态），
-> 单靠每轮在用户消息里重复一遍既费 token 又不稳 —— 一旦某轮忘了写，行为就漂回去。
-> 本插件把这份口径做成**系统提示词段**，由宿主每次模型调用自动带上；要换档或停用就点一下按钮，
-> 且**不需要改 DSH 本体、不需要重装插件**。
+- **不联网**：源码里没有 http / https / net / dns / child_process 调用（`scripts/check.mjs` 会断言）。
+- **不写 DSH home 之外的位置**，不改 DSH 安装目录，不装服务、不写注册表、不申请管理员权限。
+- 载荷是随包分发的**提示词文本**（`prompts/*.md`）。
+- 离线自检：`node scripts/check.mjs`（只读，不联网，不需要密钥）。
 
-## 三档
+---
 
-| 档 | 按钮文案 | 颜色 | 注入内容 |
-|---|---|---|---|
-| 🟢 **green** | `启用注入（中文）` | 绿 `#10b981` | `language-zh`(20) + `kernel-zh`(100) + `reinforcement-zh`(200) |
-| 🔵 **blue** | `启用注入（英文）` | 蓝 `#3b82f6` | `kernel-en`(100) + `reinforcement-en`(200) —— **无语言段** |
-| 🔴 **red** | `暂停注入` | 红 `#ef4444` | 不注入任何载荷 |
+## 0. 如果你是 agent，请先读这一段
 
-`ptc-hygiene`（order 30）**三档常驻**：它是 run_code 工具纪律，不属于语言实验变量。
-
-**blue 档是"干净的英文基线"**：只挂英文 L1/L2、不挂语言段，英文思考的要求因此写在 `kernel-en.md` §8 里。它用于把「思考语言」与「载荷」两个变量分开测量。
-
-## 轮次级生效（v3 起的核心机制）
-
-- **点选只登记 pending** —— 按钮按下后不立即改载荷，只在主文案后追加 ` · 状态已发生变化`；
-- **下一轮开始时才应用** —— 进入新一轮（新的 `user/message`）时，把 pending 落到 section 挂载、写状态文件、写日志；
-- **单轮内切换不生效** —— 同一轮里的所有请求共用同一套载荷，这是载荷对照能成立的前提；
-- **切回生效档 = 取消 pending** —— 提示随即消失，不写日志；
-- **日志按轮次记账** —— `session-modes.jsonl` 一行 = 一次真正生效，带 `turn`（轮次号）与 `trigger: "turn-start"`。
-
-## 按钮交互
-
-| 操作 | 行为 |
+| 事实 | 说明 |
 |---|---|
-| **左键** | 绿/蓝 ▶ 红；红 ▶ **本对话最近用过的非红档**（没用过则 ▶ 绿） |
-| **右键** | 弹出三档菜单任选（当前档实心标记） |
-| 文案后缀 | 点选后、生效前显示 ` · 状态已发生变化`；生效后自动消失 |
-| 圆点 | 与档位无关：表示最近一次回复的判定（绿=符合 / 红=越界 / 灰=尚无） |
+| 这是什么 | 一个 **DSH 宿主插件**（往系统提示词槽位挂文本 + 一个状态条按钮），不是可执行程序，也不产生后台进程 |
+| 安装改什么 | 只有两处：目标 profile 的 `package.json`（改前自动备份）、`node_modules/<包名>` 下的一个目录链接 |
+| 是否联网 | 否。`node scripts/check.mjs` 会断言源码中没有网络与子进程调用 |
+| 重启 | 装完必须**完全重启** DSH。**不要由你去结束这个宿主的进程** —— 那会中断你自己所在的会话，请把这一步交给用户 |
 
-## 载荷分层
+---
 
-| order | section | 文件 | 三档归属 |
-|---:|---|---|---|
-| **20** | `custom-prompt-injection:language-zh` | `prompts/language-zh.md` | 仅 green |
-| **30** | `custom-prompt-injection:ptc-hygiene` | `prompts/ptc-hygiene.md` | **三档常驻** |
-| **100** | `custom-prompt-injection:global-system-prompt` | `prompts/kernel-zh.md` / `kernel-en.md` | green / blue |
-| **200** | `custom-prompt-injection:dual-layer-reinforce` | `prompts/reinforcement-zh.md` / `reinforcement-en.md` | green / blue |
+## 1. 它做什么
 
-载荷夹在宿主 `deployment:persona-prefix`（order 0）与 `PLAN_POLICY`（order 500）之间；宿主排序规则为 `order` 升序、同 order 按 section 名字典序。**改载荷文件内容需完全重启 DSH**（模块顶层常量）；**切换档位只需等到下一轮**。
+DSH 每次模型调用都会把一段系统提示词放在最前面。本插件往这段提示词里**再挂上若干段文本**，
+文本取自本包 `prompts/`。挂哪些由当前档位决定：
 
-## 与另外两个 PTC 增强插件的关系
-
-本插件、**`dsh-ptc-plus`**、**`dsh-fail-logger`** 围绕同一件事 —— 让 PTC（程序化工具调用）会话**跑得稳、失败能查**：
-
-| 插件 | 角色 | 与本插件的配合点 |
+| 档 | 挂载的载荷 | 按钮文案 |
 |---|---|---|
-| **`dsh-ptc-plus`** | PTC 能力扩展（程序 API 发现、`code.run` 等） | 本插件的 `ptc-hygiene`(order 30) 段就是为 PTC 会话写的 **run_code 纪律**（一行一声明 · ASCII 标点 · lossless JSON · 失败按行修） |
-| **`dsh-fail-logger`** | 工具失败自动实录 + `fail-log-guide` 技能 | 互补：它记「哪里失败了」，本插件的 `ledger.jsonl` 记「哪一轮的口径判定」 |
-| **本插件** | 载荷与档位控制（含 PTC 纪律段） | — |
+| 🟢 green（中文档） | `language-zh.md`(20) + `kernel-zh.md`(100) + `reinforcement-zh.md`(200) | `启用注入（中文）` |
+| 🔵 blue（英文档 · **默认**） | `kernel-en.md`(100) + `reinforcement-en.md`(200) | `启用注入（英文）` |
+| 🔴 red（不注入） | 都不挂 | `暂停注入` |
+| 常驻 | `ptc-hygiene.md`(30) —— 三档都在 | — |
 
-**不依赖其运行**：三者互不 import、互不注册对方的服务；缺任何一个，本插件的三档切换、状态记忆与日志照常工作。
-**但推荐一起装**：只装本插件时 `ptc-hygiene` 段仍会注入（纪律照常生效），但拿不到 PTC 能力扩展与失败复盘入口 —— 而那两样正是这套纪律要配合的对象。
+括号里是挂载顺序（order）。载荷夹在宿主自己的段落之间，不替换宿主提示词。
 
-### 配套版本（2026-10-10 实测于 `0.2.0-rc.2` · profile `web`）
+---
 
-| 插件 | 实际安装版本 | 声明方式 | 角色 |
-|---|---|---|---|
-| **`dsh-custom-prompt-injection`**（本插件） | **1.1.0** | 本地源码 `link:` | 三档载荷与档位控制（含 `ptc-hygiene`(30) 纪律段） |
-| **`dsh-ptc-plus`** | **0.4.10** | `^0.4.10` | PTC 能力扩展（程序 API 发现、`code.run` 等） |
-| **`dsh-fail-logger`** | **0.5.5** | GitHub tarball（commit `bce6c99`） | 工具失败自动实录 + `fail-log-guide` 技能 |
+## 2. 安装
 
-> 三者版本互相独立：本插件的 `ptc-hygiene` 段**不读取**它们的 API，只约定"面向 PTC 会话的纪律"；
-> 升级其中任何一个都不需要重装另外两个。
+### 2.0 先看它会改什么（不落盘）
 
-## 兼容性
+```
+node install.mjs --list      # 只列出检测到的 home 与 profile
+node install.mjs --dry-run   # 打印将要做的每一处改动
+```
 
-| 项 | 要求 |
+### 2.1 一键安装（推荐）
+
+```
+node install.mjs
+```
+
+**找哪个 home**（按优先级，命中即止）：
+
+1. `--home <路径>` 显式指定
+2. 环境变量 `DSH_HOME`
+3. `~/.dsh`
+4. 启动器数据目录下的 `homes/*`（Windows 是 `%APPDATA%\in.dsh-plug.dsh-launcher\homes\`）
+
+默认**只装第一个命中的 home**；要把检测到的全部装一遍，加 `--all`。
+用 `--profile <名>` 可以限定只装某个 profile（可重复）。
+
+包装器（等价，按需选）：
+
+```
+.\install.ps1                    # Windows PowerShell
+install.bat                       # Windows 双击
+./install.sh                      # macOS / Linux
+```
+
+安装器做的事，一次说清：
+
+1. 定位 home 与 profile；
+2. 备份 `<profile>/package.json` → `package.json.bak-install-<时间戳>`；
+3. 在 `dependencies` 写入 `"dsh-custom-prompt-injection": "link:<本包绝对路径>"`；
+4. 在 `dsh.profile.bundles` 追加 `"dsh-custom-prompt-injection"`；
+5. 在 `<profile>/node_modules/` 下建一个指向本包的目录链接。
+
+**它不会**跑 `pnpm install` / `npm install`（本包没有依赖，跑了只会重链 `node_modules`），
+也不删除任何非链接目录 —— 目标不是链接时它会跳过并告诉你。
+
+### 2.2 手工安装（不用脚本，六步）
+
+```
+1) 找到 home：$DSH_HOME，或 ~/.dsh，或启动器数据目录的 homes/<版本>/
+2) 选 profile：<home>/profiles/web（该目录下要有 package.json）
+3) 备份：把 <profile>/package.json 复制一份留底
+4) 编辑 <profile>/package.json：
+     a) dependencies 里加一行（路径用正斜杠，不用反斜杠）：
+          "dsh-custom-prompt-injection": "link:<本包所在目录的绝对路径>"
+     b) dsh.profile.bundles 数组末尾加一项 —— 这里写【包名】，不是路径：
+          "dsh-custom-prompt-injection"
+   ⚠️ a 写路径、b 写包名，写反了会静默失败（看起来装上了，其实不加载）
+5) 建目录链接，指向本包所在目录：
+     Windows（免管理员）：
+       cmd /c mklink /J "<profile>\node_modules\dsh-custom-prompt-injection" "<本包绝对路径>"
+     macOS / Linux：
+       ln -s "<本包绝对路径>" "<profile>/node_modules/dsh-custom-prompt-injection"
+6) 完全重启 DSH
+```
+
+### 2.3 卸装
+
+```
+node uninstall.mjs            # 加 --dry-run 可先预演；加 --all 处理全部检测到的 home
+.\uninstall.ps1  /  ./uninstall.sh
+```
+
+卸载只删两处：`dependencies` 的 link 行、`dsh.profile.bundles` 的该项，再加 `node_modules` 下的链接。
+**插件源码目录不删**；home 里的 `state.json` 与台账也保留 —— 重装后档位偏好还在。
+
+---
+
+## 3. 装完怎么验
+
+```
+node scripts/check.mjs        # 离线结构自检（文件齐备 / 清单自洽 / 载荷锚点 / 源码无网络调用）
+```
+
+然后**完全重启 DSH**，看三处：
+
+| 看哪里 | 应该看到 |
 |---|---|
-| DSH 版本 | `>=0.1.1-rc.1 <0.3.0`（清单 `dsh.compatibility.runtime`）；本机在 **`0.1.5-rc.3` / `0.1.7-rc.2` / `0.2.0-rc.2`** 三份 home 均已装载 |
-| 系统 | Windows / macOS / Linux 均可（纯 JS，无原生依赖；安装脚本三种平台各一份） |
+| 输入框上方 | 一个三色状态条（绿=中文档 / 蓝=英文档 / 红=不注入）。界面不显示版本号 |
+| 新会话里调工具 | `custom_prompt_profile` 返回档位、挂载槽位与状态来源 |
+| home 目录 | 重启后出现 `dsh-custom-prompt-injection/state.json` |
+
+> **重启是必须的**：载荷在模块顶层只读一次。刷新页面、新开对话都**不算**重启。
+> 改 `prompts/*.md` 的内容同样要完全重启才生效；切换档位只需等到下一轮。
+
+---
+
+## 4. 日常使用
+
+| 想做什么 | 怎么做 |
+|---|---|
+| 换档 / 暂停 | 点输入框上方状态条；**左键**在绿蓝红之间循环，**右键**直接选档 |
+| 查当前档位与载荷 | 调 `custom_prompt_profile` 工具 |
+| 看生效记录 | `node scripts/ledger.mjs`（读 home 下的 JSON 行台账） |
+| 改载荷文本（维护者） | 改 `prompts/*.md` → `node scripts/check.mjs` → **完全重启** |
+
+**档位是进程级全局的**：它不按会话区分。多会话同开时，最后切换的档位对所有会话的下一轮请求生效。
+
+**生效时机是轮次级**：点选只登记一个 pending，要等**下一轮开始**才真正换载荷；
+同一轮内的所有请求共用同一套载荷。点回当前档位即取消 pending。
+
+---
+
+## 5. 排错
+
+| 症状 | 原因与处置 |
+|---|---|
+| 装完没反应 | 九成是没**完全重启**。刷新页面不算 |
+| 状态条不出现 | 客户端半是启动时装载的 —— 改 `client.js` 后必须重启，刷新无效 |
+| 插件加载了但注入为空 | `prompts/` 没跟过来。跑 `node scripts/check.mjs` 看是否报缺文件 |
+| 图标出现但点不动 | profile 的 `package.json` 里 `dependencies` 与 `dsh.profile.bundles` 只写了一处；两处都要有 |
+| 想确认装到哪了 | `node install.mjs --list` 列出检测到的 home / profile |
+| 与别的提示词插件冲突 | 都注册系统提示词段时会**叠加**。需要独占时二选一保留 |
+
+---
+
+## 6. 文件地图
+
+| 路径 | 作用 |
+|---|---|
+| `index.js` | 宿主半：读载荷、按档位挂载/摘除槽位、注册 `custom_prompt_profile` 工具与会话投影 |
+| `client.js` | 客户端半（手写 bundle）：输入框上方的三色状态条 |
+| `cordis.patch.yml` | patch 层 `insert` 条目（另一条注册路线时用） |
+| `prompts/` | 载荷文本（6 个文件）。档位与文件的挂载关系见 §1 的表 |
+| `install.mjs` / `uninstall.mjs` | 安装与卸载（跨平台、零依赖） |
+| `install.ps1` `.sh` `.bat` / `uninstall.ps1` `.sh` | 上面两个脚本的薄包装，只负责找 node |
+| `scripts/check.mjs` | 离线自检（只读） |
+| `scripts/ledger.mjs` | 台账查看器 |
+| `scripts/smoke-injection-host.mjs` | 宿主半冒烟测试（用一次性临时 home，不碰你的环境） |
+
+---
+
+## 7. 兼容性与隐私
+
+| 项 | 值 |
+|---|---|
+| DSH 运行时 | `>=0.1.1-rc.1 <0.3.0`（`package.json` 的 `dsh.compatibility.runtime`） |
+| 系统 | Windows / macOS / Linux 均可（纯 JS，无原生依赖） |
 | 宿主半 | 需要 `systemPrompt` 槽位服务与 `tools` 注册能力 |
-| 客户端半 | WebUI（`dsh.client.platform = web`）；在输入框上方挂座位 |
-| 权限 | 声明两项：**系统提示词注入**、**客户端状态条**；不申请文件系统与网络权限 |
+| 客户端半 | WebUI（`dsh.client.platform = web`） |
+| 权限声明 | 系统提示词注入 · 客户端状态条。不申请文件系统与网络权限 |
 
-> ⚠️ **与其它同样注册系统提示词段的插件并用会出现叠加**（多份载荷一起进前缀）。需要本插件独占口径时，二选一保留。
+插件不收集、不上传任何数据；台账与状态文件只写在本机 `$DSH_HOME` 下。
 
-## 安装
+---
 
-### 方法一：一键脚本（推荐）
+## 8. 设计取舍
 
-```powershell
-# Windows
-.\install.ps1            # 或双击 install.bat
-```
-
-```bash
-# macOS / Linux
-./install.sh
-```
-
-脚本做三件事：把插件目录链接进目标 home 的 profile、按需要写 `cordis.patch.yml` 的 insert 段、打印重启提示。**装完必须完全重启 DSH**。
-
-### 方法二：手动
-
-```powershell
-$H = "<你的 DSH_HOME>"; $P = "$H\profiles\web"
-# 1) 目录链接（link: 依赖）
-# 2) profile 的 package.json 里加："dsh-custom-prompt-injection": "link:<插件目录>"
-# 3) cordis.patch.yml 里加：
-#      - insert:
-#          - id: dsh-custom-prompt-injection
-#            name: dsh-custom-prompt-injection
-```
-
-详细步骤见 [`INSTALL.md`](INSTALL.md)。
-
-### 卸载
-
-```powershell
-.\uninstall.ps1          # 或 ./uninstall.sh
-```
-
-卸载会摘掉链接与 insert 段，**不碰** home 状态文件（下次装回来开关状态还在）。
-
-## 使用
-
-| 做什么 | 怎么做 |
-|---|---|
-| 暂停 / 恢复注入 | 点输入框上方的按钮（绿＝注入中，红＝已暂停）；状态立刻生效并**跨重启保留** |
-| 查当前载荷与开关 | 调 `custom_prompt_profile` 工具 |
-| 看命中记录 | 读 home 下的台账文件（JSON 行）；用 `sid` + `seq` 回会话日志还原当时上下文 |
-| 改注入内容 | 改 `prompts/kernel-zh.md`（及同步 `kernel-mirror.md`）与 `prompts/reinforcement-zh.md` → 跑自检 → **完全重启 DSH** |
-
-> **改载荷的纪律**：中文与英文两套各自独立成文件；`scripts/smoke-injection-host.mjs` 会按文件内容**逐字节**断言 L1/L2 文本与文件一致。改完载荷必须**完全重启 DSH**。
-
-## ⚠️ 安全说明
-
-### 它会做什么
-
-- 读自己 home 下的状态文件与台账文件；
-- 向 DSH 的系统提示词槽位注册文本（常量，来自 `prompts/`）：**green** 挂语言段(20)+中文 L1(100)+中文 L2(200)；**blue** 挂英文 L1/L2；**red** 全不挂；**ptc-hygiene**(30) 三档常驻；
-- 注册一个只读的元数据工具 `custom_prompt_profile`；
-- 在 WebUI 输入框上方挂一个按钮与一条状态显示。
-
-### 它不会做什么
-
-- **不发起任何网络请求**；不注册系统协议（`install` 脚本不会把 `dsh://` 之类塞进注册表）；
-- **不改 DSH 安装树**、不装服务、不写注册表、不申请管理员权限；
-- **不写 DSH 之外的位置**；台账与状态文件都在自己的 `$DSH_HOME` 下。
-
-## 工作原理
-
-两半结构 + 一份清单补丁：
-
-| 半 | 文件 | 职责 |
-|---|---|---|
-| 宿主半 | `index.js` | 读载荷（**模块顶层只读一次**）→ 读一次 home 状态文件 → 挂载/摘除 2 个可开关槽位（另加 1 个常驻语言段） → 注册 1 个工具 → 注册 1 个会话投影（armor）→ 注册 1 条开关路由 |
-| 客户端半 | `client.js`（手写 bundle） | 输入框上方的**三档状态条**（绿/蓝/红；左键切换 + 右键三档菜单 + `data-mode` 属性）；显示投影里的判定结果与状态文件异常提示 |
-| 清单补丁 | `cordis.patch.yml` | `insert: [{ id, name }]`，用于 patch 层注册路线 |
-
-载荷现状（**2026-10-01 起为 V3 平衡版**）：
-
-| 文件 | 字节 | 角色 | 谁读它 |
-|---|---|---|---|
-| `prompts/kernel-zh.md` | **9,289** | L1 内核（权威源） | `index.js` |
-| `prompts/kernel-mirror.md` | **9,289**（与上者同 SHA256） | 内核的兼容副本 | `index.js` **不读**；两套自检读 |
-| `prompts/reinforcement-zh.md` | **14,986** | L2 强化层 | `index.js` |
-
-> **原版载荷（21,065 B + 37,969 B）已移出插件目录另存**，不在本仓库内 —— 它是历史留档，运行时不再读取。
-> 早期文档里 §「载荷构成」标的 21,065 / 37,969 是**原版数字**，与本节的现役值不一致；以本节为准。
-
-## 验证状态
-
-| 自检 | 覆盖 | 怎么跑 |
-|---|---|---|
-| `verify:injected` | 现役载荷（L1 内核 + L2 强化 + 常驻语言段）结构与同源（41 项断言） | `npm run verify:injected` |
-| `verify:anchors` | 兼容回归：载荷锚点 / 注入面同源覆盖 / `index.js` 导出 / 安装协议 / 用例库结构（106 项断言） | `npm run verify:anchors` |
-| `verify:archive` | 留档载荷同源校验（留档在位时 373 项）；**留档已移出插件目录 → 现况为跳过**（打印存放位置，退出码 0） | `npm run verify:archive` |
-| `smoke:client` | 客户端半（44 条） | `npm run smoke:client` |
-| `smoke:host` | 宿主半（56 条） | `npm run smoke:host` |
-| `smoke:scorer` | 评分器语义 | `npm run smoke:scorer` |
-| 语法 | `node --check index.js && node --check client.js` | `npm run harness:check` |
-
-本机实测：**DSH `0.1.7-rc.2`** 上装载正常、开关按钮渲染正常、`custom_prompt_profile` 返回结构正常。
-
-## 设计原则
-
-- **常量载荷、运行时档位**：载荷在模块顶层读一次，改文本必须重启；档位单独存 home（schema 2 = `mode`），改它**下一轮生效**、不用重启。两件事不混。
-- **台账只留指针**：不把助手输出片段写进台账（那是会话正文），只留 `sid`/`seq` 等可回查的指针。
-- **不显示版本号**：界面（按钮、气泡、控制台输出、工具返回值）一律不显示版本；版本只出现在自述与 `package.json`。
-- **可离线自检**：任何一次载荷修改都必须先过自检再重启，不靠「看起来对」。
-
-## 文档
-
-| 文件 | 内容 |
-|---|---|
-| [`INSTALL.md`](INSTALL.md) | 逐平台的安装 / 卸载步骤与排错 |
-| [`HARNESS_PLUGIN.md`](HARNESS_PLUGIN.md) | 宿主半的接口契约（槽位、投影、路由、工具） |
-| [`BASELINE.md`](BASELINE.md) | 实测基线（载荷哈希、自检项数、实测版本） |
-| `scripts/` | 全部自检与验证脚本 |
-| `tests/` | 提示词题库与基准数据（供 `smoke:scorer`） |
+- **常量载荷、运行时档位**：载荷在模块顶层读一次 —— 改文本要重启；档位单独记在 home，改它下一轮即生效。两件事不混。
+- **台账只留指针**：不把助手输出写进台账（那是会话正文），只留 `sid` / `seq` 等可回查的指针。
+- **界面不显示版本号**：版本只出现在本文件与 `package.json` 里。
+- **可离线自检**：任何一次改动都先过 `node scripts/check.mjs`，不靠「看起来对」。
 
 ## 许可证
 
-MIT —— 见 [`LICENSE`](LICENSE)。
-
-### 隐私
-
-本插件不收集、不上传任何数据；台账与状态文件只写在本机 `$DSH_HOME` 下。
-
-## v3 变更（2026-10-10）
-
-| 项 | v2（旧） | v3（现行） |
-|---|---|---|
-| 状态 | `enabled` 布尔（启用/暂停） | `mode` 三档：`green` / `blue` / `red` |
-| 载荷 | 语言段（常驻）+ 中文 L1 + 中文 L2 | green：语言段 + 中文 L1/L2；blue：英文 L1/L2（**无语言段**）；red：无 |
-| 生效时机 | 点按钮立即改挂载 | **轮次级**：点选只登记 pending，下一轮开始才应用（单轮内不改载荷） |
-| 按钮文案 | 已启用注入 / 已暂停注入 | 启用注入（中文）/ 启用注入（英文）/ 暂停注入；点选未生效时追加「 · 状态已发生变化」 |
-| 交互 | 仅左键 | 左键（见「按钮交互」）+ **右键三档菜单** |
-| 状态文件 | `state.json` schema 1 | schema **2**（启动时自动迁移；`enabled:true → green`、`false → red`） |
-| 路由契约 | v1 `{enabled}` → `{enabled,persist}` | **v2** `{mode,sessionId}` → `{mode,pending,display,…}`（保留 `{toggle}` / `{enabled}` 兼容入口） |
-| 日志 | 只有判定台账 `ledger.jsonl` | 新增 **`session-modes.jsonl`**：一行 = 一次真正生效（带 `turn` 轮次号） |
-| 文件 | `kernel.md` / `reinforcement.md` / `language.md` | `kernel-zh.md` / `kernel-en.md` / `reinforcement-zh.md` / `reinforcement-en.md` / `language-zh.md`；旧三件归档在 `prompts/archive/v3-*.md` |
-
-下文若有仍写「开关 / 双态 / `kernel.md`」的历史段落，以本节与上文的三档描述为准。
+MIT —— 见 [LICENSE](LICENSE)。
