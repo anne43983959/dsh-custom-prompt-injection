@@ -14,17 +14,61 @@ const PROMPT_EN_URL = new URL("./prompts/kernel-en.md", import.meta.url);
 const PROMPT41_EN_URL = new URL("./prompts/reinforcement-en.md", import.meta.url);
 // 兼容 DSH 提示词变量插值引擎（非内置变量的连续花括号做安全转义，防止模板解析器抛出 malformed prompt variable reference）
 const escVars = (text) => text.replace(/\{\{(?!(?:cwd|model|provider)\}\})/g, "{ {");
-const PROMPT_TEXT = escVars(readFileSync(PROMPT_URL, "utf8"));
-const PROMPT41_TEXT = escVars(readFileSync(PROMPT41_URL, "utf8"));
-const PROMPT_EN_TEXT = escVars(readFileSync(PROMPT_EN_URL, "utf8"));
-const PROMPT41_EN_TEXT = escVars(readFileSync(PROMPT41_EN_URL, "utf8"));
+
+// ── 载荷登记表（2026-10-11）· 轮次级热重载 ───────────────────────────────
+// 以前六份载荷在模块顶层 readFileSync 一次 ⇒ 改 prompts/*.md 必须**完全重启**实例。
+// 现在每份登记「路径 + 当前文本 + mtime/size」，section 的 text thunk 走 payloadText()，
+// 于是一轮开始时由 refreshPayloads() 比对 mtime/size：未变则零读取，变了则校验后替换。
+// 宿主侧不用改 —— systemPrompt.section 的 text 本来就是回调。
+const PAYLOADS = new Map();
+function registerPayload(key, url) {
+  const st = statSync(url);
+  const rec = { key: key, url: url, mtimeMs: st.mtimeMs, size: st.size, text: escVars(readFileSync(url, "utf8")), reloads: 0 };
+  PAYLOADS.set(key, rec);
+  return rec.text;
+}
+const payloadText = (key) => { const r = PAYLOADS.get(key); return r ? r.text : ""; };
+
+/** 采纳前的最低门槛：空 / 没有二级标题 / 长度暴跌（半写、截断）一律拒绝，保留上一份好副本。 */
+function payloadIsSane(next, prev) {
+  if (typeof next !== "string" || next.length === 0) return "empty";
+  if (!/\n##\s/.test(next)) return "no-heading";
+  const floor = Math.max(256, Math.floor((prev ? prev.length : 0) * 0.5));
+  if (next.length < floor) return "shrank<" + floor;
+  return null;
+}
+
+/** 变更检测：mtime + size 任一变化才真读。返回本轮实际发生的事（供日志）。 */
+function refreshPayloads() {
+  const events = [];
+  for (const rec of PAYLOADS.values()) {
+    let st;
+    try { st = statSync(rec.url); } catch { continue; }
+    if (st.mtimeMs === rec.mtimeMs && st.size === rec.size) continue;
+    let next;
+    try { next = escVars(readFileSync(rec.url, "utf8")); }
+    catch { events.push({ key: rec.key, ok: false, why: "read-failed" }); continue; }
+    const why = payloadIsSane(next, rec.text);
+    if (why) { events.push({ key: rec.key, ok: false, why: why }); continue; }
+    // 内容逐字相同（例如只是 touch 了一下）：刷新记账但不算变更、不写日志。
+    if (next === rec.text) { rec.mtimeMs = st.mtimeMs; rec.size = st.size; continue; }
+    rec.text = next; rec.mtimeMs = st.mtimeMs; rec.size = st.size; rec.reloads += 1;
+    events.push({ key: rec.key, ok: true, bytes: next.length });
+  }
+  return events;
+}
+
+const PROMPT_TEXT = registerPayload("kernel-zh", PROMPT_URL);
+const PROMPT41_TEXT = registerPayload("reinforcement-zh", PROMPT41_URL);
+const PROMPT_EN_TEXT = registerPayload("kernel-en", PROMPT_EN_URL);
+const PROMPT41_EN_TEXT = registerPayload("reinforcement-en", PROMPT41_EN_URL);
 // ── 语言段（中文，2026-10-02 自 dsh-zh-thinking 迁入；2026-10-10 起属 green 档）──
 // 它只在 green 档挂载：blue 档不挂语言段，红档不挂任何载荷。
 const LANGUAGE_URL = new URL("./prompts/language-zh.md", import.meta.url);
-const LANGUAGE_TEXT = escVars(readFileSync(LANGUAGE_URL, "utf8"));
+const LANGUAGE_TEXT = registerPayload("language-zh", LANGUAGE_URL);
 // ── PTC 纪律段（2026-10-08 新增）：order 30，常驻，不随档位变化 ──
 const HYGIENE_URL = new URL("./prompts/ptc-hygiene.md", import.meta.url);
-const HYGIENE_TEXT = escVars(readFileSync(HYGIENE_URL, "utf8"));
+const HYGIENE_TEXT = registerPayload("hygiene", HYGIENE_URL);
 
 // 双段注入镜像开关：
 //   true  = 沿用双层架构，Order 100 与 Order 200 各注入一份内核载荷
@@ -42,6 +86,22 @@ const promptSha12 = (text) => createHash("sha256").update(text, "utf8").digest("
 /** 注入内容版本标识与指纹：台账与工具输出用它判断记录是否跨版本可比。 */
 const PROMPT_REV = "v3";
 const PROMPT_SHA = promptSha12(PROMPT_TEXT + "\u0000" + PROMPT41_TEXT);
+
+/**
+ * 当前档位**实际挂载**的载荷键 —— 指纹与台账都按它算。
+ * ⚠️ 旧公式只哈希中文对（kernel-zh + reinforcement-zh），而 **blue 档挂的是英文对**：
+ *    只改英文载荷时旧指纹纹丝不动，台账记的「这一轮跑的是哪版」就是假的。
+ * 新增 promptMountedSha 而非改写 promptRevSha —— 后者要保持历史可比
+ *（台账里的 30f2c292a55f / d75e3e913635 / 442f2d06e588 都是旧口径）。
+ */
+function mountedKeys() {
+  if (mode === "red") return ["hygiene"];
+  if (mode === "blue") return DUAL_LAYER_INJECTION ? ["kernel-en", "reinforcement-en", "hygiene"] : ["kernel-en", "hygiene"];
+  return DUAL_LAYER_INJECTION
+    ? ["language-zh", "kernel-zh", "reinforcement-zh", "hygiene"]
+    : ["language-zh", "kernel-zh", "hygiene"];
+}
+const promptMountedSha = () => promptSha12(mountedKeys().map(payloadText).join("\u0000"));
 
 const SECTION_100 = "custom-prompt-injection:global-system-prompt";
 const SECTION_200 = "custom-prompt-injection:dual-layer-reinforce";
@@ -476,7 +536,7 @@ function mountResident(ctx) {
   residentDisposer = ctx.effect(() => {
     const disposers = [];
     try {
-      disposers.push(ctx.systemPrompt.section({ name: SECTION_HYGIENE, order: HYGIENE_ORDER, text: () => HYGIENE_TEXT }));
+      disposers.push(ctx.systemPrompt.section({ name: SECTION_HYGIENE, order: HYGIENE_ORDER, text: () => payloadText("hygiene") }));
     } catch (error) {
       console.warn("[custom-prompt-injection] 常驻纪律段注册跳过：" + String((error && error.message) || error));
     }
@@ -491,16 +551,16 @@ function mountResident(ctx) {
 /** 档位 → 段定义（red 返回空数组 = 什么都不挂）。 */
 function sectionsForMode(m) {
   if (m === "blue") {
-    const defs = [{ name: SECTION_100, order: 100, text: () => PROMPT_EN_TEXT }];
-    if (DUAL_LAYER_INJECTION) defs.push({ name: SECTION_200, order: 200, text: () => PROMPT41_EN_TEXT });
+    const defs = [{ name: SECTION_100, order: 100, text: () => payloadText("kernel-en") }];
+    if (DUAL_LAYER_INJECTION) defs.push({ name: SECTION_200, order: 200, text: () => payloadText("reinforcement-en") });
     return defs;
   }
   if (m === "green") {
     const defs = [
-      { name: SECTION_LANG, order: LANG_ORDER, text: () => LANGUAGE_TEXT },
-      { name: SECTION_100, order: 100, text: () => PROMPT_TEXT },
+      { name: SECTION_LANG, order: LANG_ORDER, text: () => payloadText("language-zh") },
+      { name: SECTION_100, order: 100, text: () => payloadText("kernel-zh") },
     ];
-    if (DUAL_LAYER_INJECTION) defs.push({ name: SECTION_200, order: 200, text: () => PROMPT41_TEXT });
+    if (DUAL_LAYER_INJECTION) defs.push({ name: SECTION_200, order: 200, text: () => payloadText("reinforcement-zh") });
     return defs;
   }
   return [];
@@ -1001,6 +1061,21 @@ export function apply(ctx) {
                 const turnSeq = typeof v.seq === "number" ? v.seq : Number(seq);
                 if (lastTurnSeen.get(turnSid) !== turnSeq) {
                   lastTurnSeen.set(turnSid, turnSeq);
+                  // 载荷热重载（2026-10-11）：与档位共用同一个轮次边界。
+                  // mtime/size 未变则零读取；变更后先校验，不合格就丢弃、继续用上一份好副本。
+                  try {
+                    const reloads = refreshPayloads();
+                    if (reloads.length) {
+                      const okList = reloads.filter((e) => e.ok);
+                      const badList = reloads.filter((e) => !e.ok);
+                      console.log("[custom-prompt-injection] 载荷热重载 t" + turnSeq + "：变更 " + okList.length + " 项"
+                        + (okList.length ? "（" + okList.map((e) => e.key + "=" + e.bytes + "B").join(", ") + "）" : "")
+                        + (badList.length ? " · 拒绝 " + badList.map((e) => e.key + "(" + e.why + ")").join(", ") + "（保留上一份好副本）" : "")
+                        + " · 挂载集指纹 " + promptMountedSha());
+                    }
+                  } catch (error) {
+                    console.warn("[custom-prompt-injection] 载荷热重载失败：" + String((error && error.message) || error));
+                  }
                   try {
                     applyPendingMode(ctx, turnSid, turnSeq);
                   } catch (error) {
@@ -1023,6 +1098,7 @@ export function apply(ctx) {
                 langResident: mode === "green",
                 promptRev: PROMPT_REV,
                 promptRevSha: PROMPT_SHA,
+                promptMountedSha: promptMountedSha(),
                 textLen: v.textLen === undefined ? 0 : v.textLen,
                         });
             } catch (error) {

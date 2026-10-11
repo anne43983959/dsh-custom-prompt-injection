@@ -28,6 +28,7 @@ const REQUIRED = [
   "index.js", "client.js", "cordis.patch.yml", "package.json", "README.md", "LICENSE",
   "install.mjs", "uninstall.mjs", "install.ps1", "install.sh", "install.bat",
   "uninstall.ps1", "uninstall.sh", "scripts/check.mjs", "scripts/ledger.mjs", "scripts/score-session.mjs",
+  "scripts/smoke-injection-host.mjs", "scripts/smoke-payload-hotreload.mjs",
   "prompts/kernel-zh.md", "prompts/kernel-en.md",
   "prompts/reinforcement-zh.md", "prompts/reinforcement-en.md",
   "prompts/language-zh.md", "prompts/ptc-hygiene.md",
@@ -86,6 +87,9 @@ const FORBIDDEN = [
 for (const [needle, why] of FORBIDDEN) check(!indexSrc.includes(needle), "index.js 含" + why, needle);
 check(indexSrc.includes("./prompts/"), "index.js 应从 ./prompts/ 读取载荷");
 check(indexSrc.includes("systemPrompt"), "index.js 应注册 systemPrompt 槽位");
+check(indexSrc.includes("refreshPayloads"), "index.js 应有载荷热重载（refreshPayloads）");
+check(indexSrc.includes("payloadIsSane"), "index.js 应有半写/截断的采纳门槛（payloadIsSane）");
+check(indexSrc.includes("promptMountedSha"), "index.js 应记录实际挂载集指纹（promptMountedSha）");
 const clientUrls = (clientSrc.match(/https?:\/\/[^"\s]+/g) || []);
 check(clientUrls.length === 0, "client.js 不应引用外部地址", clientUrls.slice(0, 2).join(", "));
 check(clientSrc.includes("\"/api/dsh-custom-prompt-injection/injection\""), "client.js 应调用本插件自己的同源路由");
