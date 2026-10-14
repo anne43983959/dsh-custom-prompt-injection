@@ -67,10 +67,10 @@ DSH 每次模型调用都会把一段系统提示词放在最前面。本插件�
 
 | 文件 · 节 | 原文 | 现文 |
 |---|---|---|
-| `prompts/kernel-zh.md` §4 | 让产物**照着就能跑** | 使产物**按原样即可执行** |
-| `prompts/kernel-zh.md` §7 | 把风险与回滚**写进**产物即可 | 把风险与回滚**写入**产物即可 |
-| `prompts/kernel-zh.md` §8 | 能一段写完的不**拆成**五条 bullet | 能一段写完的不**拆分为**五条 bullet |
-| `prompts/reinforcement-zh.md` §F | 不要把它**写进**回复 | 不要把它**写入**回复 |
+| `prompts/kernel-zh.md` §4 | 「让产物**照着就能跑**」 | 「使产物**按原样即可执行**」 |
+| `prompts/kernel-zh.md` §7 | 「把风险与回滚**写进**产物即可」 | 「把风险与回滚**写入**产物即可」 |
+| `prompts/kernel-zh.md` §8 | 「能一段写完的不**拆成**五条 bullet」 | 「能一段写完的不**拆分为**五条 bullet」 |
+| `prompts/reinforcement-zh.md` §F | 「不要把它**写进**回复」 | 「不要把它**写入**回复」 |
 
 **英文三件（`kernel-en` / `reinforcement-en` / `ptc-hygiene`）未改动**：核查后确认无口语化表述 —— 其中的缩略形式全部出现在「禁止句清单」或被引用的反例里（`won’t` / `I’ll` / `can’t`），属引用原文。
 
